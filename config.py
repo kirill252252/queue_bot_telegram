@@ -27,3 +27,6 @@ WEB_PANEL_PASSWORD = os.getenv("WEB_PANEL_PASSWORD", "changeme")
 
 # за сколько мест до первого предупреждать
 NOTIFY_APPROACHING = int(os.getenv("NOTIFY_APPROACHING", "3"))
+
+# id владельца бота — только он может назначать бот-админов
+BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))

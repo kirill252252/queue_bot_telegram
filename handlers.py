@@ -46,8 +46,13 @@ class ResetNick(StatesGroup):
 class SetRemind(StatesGroup):
     minutes = State()
 
-# проверяем является ли юзер админом группы
+# проверяем является ли юзер админом — Telegram-права, бот-права или владелец
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    from config import BOT_OWNER_ID
+    if user_id == BOT_OWNER_ID:
+        return True
+    if await db.is_bot_admin(user_id, chat_id):
+        return True
     try:
         m = await bot.get_chat_member(chat_id, user_id)
         return m.status in ("administrator", "creator")
@@ -1230,6 +1235,121 @@ async def cb_unsubscribe(call: CallbackQuery):
     queue_id = int(call.data.split(":")[1])
     await db.unsubscribe_queue(queue_id, call.from_user.id)
     await call.answer("🔕 Подписка отменена.", show_alert=True)
+
+
+# команды управления бот-админами — только для владельца бота
+@router.message(Command("addadmin"))
+async def cmd_addadmin(message: Message):
+    from config import BOT_OWNER_ID
+    if message.from_user.id != BOT_OWNER_ID:
+        await message.answer("❌ Только владелец бота может это делать.")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "Использование: /addadmin @username или /addadmin 123456789\n\n"
+            "Пользователь должен хотя бы раз написать боту /start."
+        )
+        return
+
+    target = args[1].strip().lstrip("@")
+
+    # ищем по username или user_id
+    async with __import__("aiosqlite").connect(__import__("database").DB_PATH) as conn:
+        conn.row_factory = __import__("aiosqlite").Row
+        if target.isdigit():
+            cur = await conn.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (int(target),))
+        else:
+            cur = await conn.execute(
+                "SELECT * FROM user_profiles WHERE username = ?", (target,))
+        row = await cur.fetchone()
+
+    if not row:
+        await message.answer(
+            "❌ Пользователь не найден в базе.\n"
+            "Попроси его написать /start боту в личке."
+        )
+        return
+
+    user_id = row["user_id"]
+    name = row["full_name"] or row["username"] or str(user_id)
+    added = await db.add_bot_admin(user_id)
+
+    if added:
+        await message.answer(f"✅ {name} теперь бот-администратор во всех группах.")
+        from notifications import safe_dm
+        await safe_dm(
+            message.bot, user_id,
+            "✅ Тебе выданы права администратора бота во всех группах."
+        )
+    else:
+        await message.answer(f"ℹ️ {name} уже является бот-администратором.")
+
+
+@router.message(Command("removeadmin"))
+async def cmd_removeadmin(message: Message):
+    from config import BOT_OWNER_ID
+    if message.from_user.id != BOT_OWNER_ID:
+        await message.answer("❌ Только владелец бота может это делать.")
+        return
+
+    if message.chat.type == "private":
+        await message.answer("❌ Команду нужно использовать в группе.")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Использование: /removeadmin @username или /removeadmin 123456789")
+        return
+
+    target = args[1].strip().lstrip("@")
+    chat_id = message.chat.id
+
+    async with __import__("aiosqlite").connect(__import__("database").DB_PATH) as conn:
+        conn.row_factory = __import__("aiosqlite").Row
+        if target.isdigit():
+            cur = await conn.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (int(target),))
+        else:
+            cur = await conn.execute(
+                "SELECT * FROM user_profiles WHERE username = ?", (target,))
+        row = await cur.fetchone()
+
+    if not row:
+        await message.answer("❌ Пользователь не найден.")
+        return
+
+    user_id = row["user_id"]
+    name = row["full_name"] or row["username"] or str(user_id)
+    await db.remove_bot_admin(user_id, chat_id)
+    await message.answer(f"✅ Права администратора в этой группе сняты с {name}.")
+
+
+@router.message(Command("admins"))
+async def cmd_admins(message: Message):
+    from config import BOT_OWNER_ID
+    if message.from_user.id != BOT_OWNER_ID:
+        await message.answer("❌ Только владелец бота.")
+        return
+
+    if message.chat.type == "private":
+        await message.answer("❌ Используй команду в группе.")
+        return
+
+    admins = await db.get_bot_admins(message.chat.id)
+    if not admins:
+        await message.answer("В этой группе нет бот-администраторов.")
+        return
+
+    lines = [f"👑 <b>Бот-администраторы в {message.chat.title}:</b>\n"]
+    for a in admins:
+        name = a.get("full_name") or a.get("username") or str(a["user_id"])
+        username = f" (@{a['username']})" if a.get("username") else ""
+        lines.append(f"• {name}{username} — <code>{a['user_id']}</code>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):

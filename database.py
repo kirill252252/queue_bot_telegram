@@ -583,3 +583,68 @@ async def decline_swap(request_id: int):
         await db.execute(
             "UPDATE swap_requests SET status='declined' WHERE id=?", (request_id,))
         await db.commit()
+
+
+# бот-админы — назначаются владельцем бота для конкретной группы
+async def add_bot_admin(user_id: int, chat_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        try:
+            await db.execute(
+                "INSERT INTO bot_admins (user_id, chat_id) VALUES (?, ?)",
+                (user_id, chat_id))
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+
+async def remove_bot_admin(user_id: int, chat_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM bot_admins WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id))
+        await db.commit()
+
+
+async def is_bot_admin(user_id: int, chat_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        cur = await db.execute(
+            "SELECT 1 FROM bot_admins WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id))
+        return bool(await cur.fetchone())
+
+
+async def get_bot_admins(chat_id: int) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        cur = await db.execute("""
+            SELECT b.user_id, b.chat_id, b.added_at, p.full_name, p.username
+            FROM bot_admins b
+            LEFT JOIN user_profiles p ON p.user_id = b.user_id
+            WHERE b.chat_id = ?
+        """, (chat_id,))
+        return [dict(r) for r in await cur.fetchall()]
