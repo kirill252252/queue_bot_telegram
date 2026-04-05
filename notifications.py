@@ -53,19 +53,30 @@ async def notify_became_first(bot: Bot, queue: dict, member: dict, chat_id: int)
     fire_at = (datetime.utcnow() + timedelta(minutes=remind_min)).strftime("%Y-%m-%d %H:%M:%S")
     await db.create_reminder(queue["id"], user_id, fire_at)
 
-# предупреждаем что скоро очередь
+# предупреждаем что скоро очередь — в личку, если нет — в группу
 async def notify_approaching(bot: Bot, queue: dict, member: dict, position: int):
     if NOTIFY_APPROACHING <= 0:
         return
     if position > NOTIFY_APPROACHING:
         return
-    await safe_dm(
-        bot, member["user_id"],
+    left = position - 1
+    text = (
         f"⚡ <b>Скоро твоя очередь!</b>\n\n"
-        f"В очереди <b>«{queue['name']}»</b> до тебя осталось <b>{position - 1}</b> чел.\n"
-        f"Готовься!",
-        parse_mode="HTML"
+        f"В очереди <b>«{queue['name']}»</b> до тебя осталось <b>{left}</b> чел.\n"
+        f"Готовься!"
     )
+    dm_ok = await safe_dm(bot, member["user_id"], text, parse_mode="HTML")
+    if not dm_ok:
+        username = member.get("username")
+        mention = f"@{username}" if username else member["display_name"]
+        try:
+            await bot.send_message(
+                queue["chat_id"],
+                f"⚡ {mention}, до тебя в очереди <b>«{queue['name']}»</b> осталось <b>{left}</b> чел. Готовься!",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Cannot notify approaching in group: {e}")
 
 async def notify_kicked(bot: Bot, queue: dict, user_id: int, by_timeout: bool = False):
     reason = "за неактивность ⏱" if by_timeout else "администратором"
