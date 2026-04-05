@@ -302,10 +302,12 @@ async def create_reminder(queue_id: int, user_id: int, fire_at: str):
 
 
 async def get_due_reminders(now: str) -> list[dict]:
+    from datetime import datetime
     pool = await get_pool()
+    now_dt = datetime.strptime(now, "%Y-%m-%d %H:%M:%S")
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM reminder_tasks WHERE fire_at <= $1::timestamp AND done=0", now)
+            "SELECT * FROM reminder_tasks WHERE fire_at <= $1 AND done=0", now_dt)
         return [dict(r) for r in rows]
 
 

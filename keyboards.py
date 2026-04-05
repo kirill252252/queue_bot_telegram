@@ -110,12 +110,25 @@ def queue_list_keyboard(queues: list[dict], is_admin: bool) -> InlineKeyboardMar
 
 # действия с конкретной очередью в группе
 def queue_actions_keyboard(queue_id: int, user_in: bool,
-                           is_admin: bool, is_closed: bool) -> InlineKeyboardMarkup:
+                           is_admin: bool, is_closed: bool,
+                           user_is_first: bool = False) -> InlineKeyboardMarkup:
     buttons = []
     if not is_closed:
-        label = "🚪 Выйти из очереди" if user_in else "✋ Занять место"
-        cb    = f"leave:{queue_id}"   if user_in else f"join:{queue_id}"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=cb)])
+        if user_in:
+            if user_is_first:
+                buttons.append([InlineKeyboardButton(
+                    text="✅ Я прошёл, следующий!",
+                    callback_data=f"done_next:{queue_id}"
+                )])
+            buttons.append([InlineKeyboardButton(
+                text="🚪 Выйти из очереди",
+                callback_data=f"leave:{queue_id}"
+            )])
+        else:
+            buttons.append([InlineKeyboardButton(
+                text="✋ Занять место",
+                callback_data=f"join:{queue_id}"
+            )])
     if is_admin:
         if not is_closed:
             buttons.append([
@@ -124,6 +137,8 @@ def queue_actions_keyboard(queue_id: int, user_in: bool,
             ])
             buttons.append([InlineKeyboardButton(text="👢 Кикнуть участника",
                                                   callback_data=f"kick_menu:{queue_id}")])
+            buttons.append([InlineKeyboardButton(text="🔗 Ссылка-приглашение",
+                                                  callback_data=f"gen_invite:{queue_id}")])
         buttons.append([
             InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"queue_settings:{queue_id}"),
             InlineKeyboardButton(text="📥 CSV",        callback_data=f"export:{queue_id}"),
