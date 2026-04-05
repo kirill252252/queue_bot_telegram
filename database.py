@@ -2,9 +2,9 @@ import aiosqlite
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
-from datetime import datetime
 
 DB_PATH = "queue_bot.db"
+
 
 # создаём все таблицы при старте
 async def init_db():
@@ -360,15 +360,14 @@ async def get_member_count(queue_id: int) -> int:
 
 # планируем напоминание на конкретное время
 async def create_reminder(queue_id: int, user_id: int, fire_at: str, kind: str = 'remind'):
-    pool = await get_pool()
-    fire_dt = datetime.strptime(fire_at, "%Y-%m-%d %H:%M:%S")
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE reminder_tasks SET done=1 WHERE queue_id=$1 AND user_id=$2 AND done=0",
-            queue_id, user_id)
-        await conn.execute(
-            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at, kind) VALUES ($1,$2,$3,$4)",
-            queue_id, user_id, fire_dt, kind)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE reminder_tasks SET done=1 WHERE queue_id=? AND user_id=? AND done=0",
+            (queue_id, user_id))
+        await db.execute(
+            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at, kind) VALUES (?,?,?,?)",
+            (queue_id, user_id, fire_at, kind))
+        await db.commit()
 
 
 async def get_due_reminders(now: str) -> list[dict]:
