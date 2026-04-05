@@ -86,6 +86,38 @@ async def init_db():
                 UNIQUE(queue_id, user_id)
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS queue_invites (
+                token TEXT PRIMARY KEY,
+                queue_id INTEGER NOT NULL,
+                created_by BIGINT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS swap_requests (
+                id SERIAL PRIMARY KEY,
+                queue_id INTEGER NOT NULL,
+                from_user BIGINT NOT NULL,
+                to_user BIGINT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id BIGINT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                added_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        await conn.execute("""
+            ALTER TABLE queue_members ADD COLUMN IF NOT EXISTS frozen_until TIMESTAMP
+        """)
+        await conn.execute("""
+            ALTER TABLE reminder_tasks ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'remind'
+        """)
 
 
 # ─── All functions mirror database.py exactly ────────────────────────────────
@@ -290,17 +322,15 @@ async def get_user_queue_memberships(user_id: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-async def create_reminder(queue_id: int, user_id: int, fire_at: str, kind: str = 'remind'):
-    from datetime import datetime
-    fire_dt = datetime.strptime(fire_at, "%Y-%m-%d %H:%M:%S")
+async def create_reminder(queue_id: int, user_id: int, fire_at: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE reminder_tasks SET done=1 WHERE queue_id=$1 AND user_id=$2 AND done=0",
             queue_id, user_id)
         await conn.execute(
-            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at) VALUES ($1,$2,$3)",
-            queue_id, user_id, fire_dt)
+            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at) VALUES ($1,$2,$3::timestamp)",
+            queue_id, user_id, fire_at)
 
 
 async def get_due_reminders(now: str) -> list[dict]:
@@ -375,3 +405,190 @@ async def get_stats(chat_id: int) -> dict:
             "active_queues": active_queues,
             "total_members": total_members,
         }
+
+
+import secrets
+from datetime import datetime, timedelta
+
+
+async def create_invite(queue_id: int, created_by: int) -> str:
+    token = secrets.token_urlsafe(8)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO queue_invites (token, queue_id, created_by) VALUES ($1,$2,$3)",
+            token, queue_id, created_by)
+    return token
+
+
+async def get_invite(token: str) -> Optional[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM queue_invites WHERE token=$1", token)
+        return dict(row) if row else None
+
+
+async def freeze_member(queue_id: int, user_id: int, minutes: int) -> bool:
+    until = datetime.utcnow() + timedelta(minutes=minutes)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE queue_members SET frozen_until=$1 WHERE queue_id=$2 AND user_id=$3",
+            until, queue_id, user_id)
+    return True
+
+
+async def unfreeze_member(queue_id: int, user_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE queue_members SET frozen_until=NULL WHERE queue_id=$1 AND user_id=$2",
+            queue_id, user_id)
+
+
+async def is_frozen(queue_id: int, user_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT frozen_until FROM queue_members WHERE queue_id=$1 AND user_id=$2",
+            queue_id, user_id)
+        if not row or not row['frozen_until']:
+            return False
+        return row['frozen_until'] > datetime.utcnow()
+
+
+async def get_queue_members_active(queue_id: int) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM queue_members
+            WHERE queue_id=$1 AND (frozen_until IS NULL OR frozen_until <= NOW())
+            ORDER BY position ASC
+        """, queue_id)
+        return [dict(r) for r in rows]
+
+
+async def create_swap_request(queue_id: int, from_user: int, to_user: int) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE swap_requests SET status='cancelled'
+            WHERE queue_id=$1 AND from_user=$2 AND to_user=$3 AND status='pending'
+        """, queue_id, from_user, to_user)
+        row = await conn.fetchrow(
+            "INSERT INTO swap_requests (queue_id, from_user, to_user) VALUES ($1,$2,$3) RETURNING id",
+            queue_id, from_user, to_user)
+        return row['id']
+
+
+async def get_swap_request(request_id: int) -> Optional[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM swap_requests WHERE id=$1", request_id)
+        return dict(row) if row else None
+
+
+async def execute_swap(queue_id: int, user_a: int, user_b: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row_a = await conn.fetchrow(
+            "SELECT position FROM queue_members WHERE queue_id=$1 AND user_id=$2", queue_id, user_a)
+        row_b = await conn.fetchrow(
+            "SELECT position FROM queue_members WHERE queue_id=$1 AND user_id=$2", queue_id, user_b)
+        if not row_a or not row_b:
+            return False
+        pos_a, pos_b = row_a['position'], row_b['position']
+        await conn.execute(
+            "UPDATE queue_members SET position=9999 WHERE queue_id=$1 AND user_id=$2", queue_id, user_a)
+        await conn.execute(
+            "UPDATE queue_members SET position=$1 WHERE queue_id=$2 AND user_id=$3", pos_a, queue_id, user_b)
+        await conn.execute(
+            "UPDATE queue_members SET position=$1 WHERE queue_id=$2 AND user_id=$3", pos_b, queue_id, user_a)
+        await conn.execute("""
+            UPDATE swap_requests SET status='done'
+            WHERE queue_id=$1 AND from_user=$2 AND to_user=$3 AND status='pending'
+        """, queue_id, user_a, user_b)
+    return True
+
+
+async def decline_swap(request_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE swap_requests SET status='declined' WHERE id=$1", request_id)
+
+
+async def add_bot_admin(user_id: int, chat_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                "INSERT INTO bot_admins (user_id, chat_id) VALUES ($1,$2)", user_id, chat_id)
+            return True
+        except asyncpg.UniqueViolationError:
+            return False
+
+
+async def remove_bot_admin(user_id: int, chat_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM bot_admins WHERE user_id=$1 AND chat_id=$2", user_id, chat_id)
+
+
+async def is_bot_admin(user_id: int, chat_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM bot_admins WHERE user_id=$1 AND chat_id=$2", user_id, chat_id)
+        return bool(row)
+
+
+async def get_bot_admins(chat_id: int) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT b.user_id, b.chat_id, b.added_at, p.full_name, p.username
+            FROM bot_admins b
+            LEFT JOIN user_profiles p ON p.user_id = b.user_id
+            WHERE b.chat_id=$1
+        """, chat_id)
+        return [dict(r) for r in rows]
+
+
+async def is_subscribed(queue_id: int, user_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM queue_subscriptions WHERE queue_id=$1 AND user_id=$2",
+            queue_id, user_id)
+        return bool(row)
+
+
+async def get_global_stats() -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        total_queues = await conn.fetchval("SELECT COUNT(*) FROM queues")
+        active_queues = await conn.fetchval("SELECT COUNT(*) FROM queues WHERE is_active=1")
+        total_members = await conn.fetchval("SELECT COUNT(*) FROM queue_members")
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM user_profiles")
+        total_chats = await conn.fetchval("SELECT COUNT(*) FROM known_chats")
+        return {
+            "total_queues": total_queues,
+            "active_queues": active_queues,
+            "total_members": total_members,
+            "total_users": total_users,
+            "total_chats": total_chats,
+        }
+
+
+async def get_user_queue_memberships(user_id: int) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT qm.queue_id, qm.position, q.name as queue_name, q.chat_id
+            FROM queue_members qm
+            JOIN queues q ON q.id = qm.queue_id
+            WHERE qm.user_id=$1 AND q.is_active=1
+            ORDER BY qm.position
+        """, user_id)
+        return [dict(r) for r in rows]
