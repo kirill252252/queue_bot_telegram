@@ -1269,18 +1269,20 @@ async def cmd_addadmin(message: Message):
         return
 
     user_id = row["user_id"]
-    name = row["full_name"] or row["username"] or str(user_id)
-    added = await db.add_bot_admin(user_id)
+    name = row.get("full_name") or row.get("username") or str(user_id)
+    chat_name = message.chat.title or str(message.chat.id)
+    added = await db.add_bot_admin(user_id, message.chat.id)
 
     if added:
-        await message.answer(f"✅ {name} теперь бот-администратор во всех группах.")
+        await message.answer(f"✅ {name} теперь администратор бота в этой группе.")
         from notifications import safe_dm
         await safe_dm(
             message.bot, user_id,
-            "✅ Тебе выданы права администратора бота во всех группах."
+            f"✅ Тебе выданы права администратора бота в группе <b>{chat_name}</b>.",
+            parse_mode="HTML"
         )
     else:
-        await message.answer(f"ℹ️ {name} уже является бот-администратором.")
+        await message.answer(f"ℹ️ {name} уже администратор бота в этой группе.")
 
 
 @router.message(Command("removeadmin"))
