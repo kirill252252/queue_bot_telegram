@@ -597,6 +597,40 @@ async def cmd_list(message: Message):
         parts.append(format_queue_info(q, members))
     await message.answer("\n\n—————\n\n".join(parts), parse_mode="HTML")
 
+
+@router.message(Command("myplace"))
+async def cmd_myplace(message: Message):
+    if message.chat.type == "private":
+        await message.answer("Используй эту команду в группе.")
+        return
+    memberships = await db.get_user_queue_memberships(message.from_user.id)
+    chat_memberships = [m for m in memberships if m["chat_id"] == message.chat.id]
+    if not chat_memberships:
+        await message.answer("Ты не стоишь ни в одной очереди этого чата.")
+        return
+    lines = ["\U0001f4cd <b>Твои места в очередях:</b>\n"]
+    for m in chat_memberships:
+        total = await db.get_member_count(m["queue_id"])
+        lines.append(f"\U0001f4cb <b>{m['queue_name']}</b> — место <b>#{m['position']}</b> из {total}")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("myplace"))
+async def cmd_myplace(message: Message):
+    if message.chat.type == "private":
+        await message.answer("Используй эту команду в группе.")
+        return
+    memberships = await db.get_user_queue_memberships(message.from_user.id)
+    chat_memberships = [m for m in memberships if m["chat_id"] == message.chat.id]
+    if not chat_memberships:
+        await message.answer("Ты не стоишь ни в одной очереди этого чата.")
+        return
+    lines = ["📍 <b>Твои места в очередях:</b>\n"]
+    for m in chat_memberships:
+        total = await db.get_member_count(m["queue_id"])
+        lines.append(f"📋 <b>{m['queue_name']}</b> — место <b>#{m['position']}</b> из {total}")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
 @router.message(Command("queue"))
 # /queue в группе — показываем список очередей
 async def cmd_queue(message: Message):
