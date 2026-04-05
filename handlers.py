@@ -1256,15 +1256,10 @@ async def cmd_addadmin(message: Message):
     target = args[1].strip().lstrip("@")
 
     # ищем по username или user_id
-    async with __import__("aiosqlite").connect(__import__("database").DB_PATH) as conn:
-        conn.row_factory = __import__("aiosqlite").Row
-        if target.isdigit():
-            cur = await conn.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?", (int(target),))
-        else:
-            cur = await conn.execute(
-                "SELECT * FROM user_profiles WHERE username = ?", (target,))
-        row = await cur.fetchone()
+    if target.isdigit():
+        row = await db.get_user_profile(int(target))
+    else:
+        row = await db.get_user_profile_by_username(target)
 
     if not row:
         await message.answer(
@@ -1307,15 +1302,10 @@ async def cmd_removeadmin(message: Message):
     target = args[1].strip().lstrip("@")
     chat_id = message.chat.id
 
-    async with __import__("aiosqlite").connect(__import__("database").DB_PATH) as conn:
-        conn.row_factory = __import__("aiosqlite").Row
-        if target.isdigit():
-            cur = await conn.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ?", (int(target),))
-        else:
-            cur = await conn.execute(
-                "SELECT * FROM user_profiles WHERE username = ?", (target,))
-        row = await cur.fetchone()
+    if target.isdigit():
+        row = await db.get_user_profile(int(target))
+    else:
+        row = await db.get_user_profile_by_username(target)
 
     if not row:
         await message.answer("❌ Пользователь не найден.")

@@ -156,6 +156,15 @@ async def get_user_profile(user_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
+async def get_user_profile_by_username(username: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM user_profiles WHERE username = ?", (username,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
 async def set_group_nick(user_id: int, chat_id: int, nick: str):
     async with aiosqlite.connect(DB_PATH) as db:
         if nick:

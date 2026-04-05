@@ -322,17 +322,15 @@ async def get_user_queue_memberships(user_id: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-async def create_reminder(queue_id: int, user_id: int, fire_at: str, kind: str = 'remind'):
-    from datetime import datetime
-    fire_dt = datetime.strptime(fire_at, "%Y-%m-%d %H:%M:%S")
+async def create_reminder(queue_id: int, user_id: int, fire_at: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE reminder_tasks SET done=1 WHERE queue_id=$1 AND user_id=$2 AND done=0",
             queue_id, user_id)
         await conn.execute(
-            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at) VALUES ($1,$2,$3)",
-            queue_id, user_id, fire_dt)
+            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at) VALUES ($1,$2,$3::timestamp)",
+            queue_id, user_id, fire_at)
 
 
 async def get_due_reminders(now: str) -> list[dict]:
@@ -594,3 +592,11 @@ async def get_user_queue_memberships(user_id: int) -> list[dict]:
             ORDER BY qm.position
         """, user_id)
         return [dict(r) for r in rows]
+
+
+async def get_user_profile_by_username(username: str) -> Optional[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM user_profiles WHERE username = $1", username)
+        return dict(row) if row else None
