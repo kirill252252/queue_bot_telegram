@@ -7,7 +7,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import (BOT_TOKEN, BOT_MODE, WEBHOOK_HOST, WEBHOOK_PATH, WEBHOOK_PORT,
                     WEB_PANEL_ENABLED, WEB_PANEL_PORT, DB_TYPE)
-from database import init_db
 from handlers import router
 from notifications import process_due_reminders
 
@@ -17,13 +16,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def get_db():
-    
-    if DB_TYPE == "postgres":
-        import database_pg as db
-        return db
-    import database as db
-    return db
 
 # бесконечный цикл — каждую минуту проверяем напоминания
 async def reminder_loop(bot: Bot):
@@ -33,6 +25,7 @@ async def reminder_loop(bot: Bot):
         except Exception as e:
             logger.error(f"Reminder loop error: {e}")
         await asyncio.sleep(60)
+
 
 # запускаем веб-панель если включена в конфиге
 async def start_web_panel():
@@ -49,15 +42,16 @@ async def start_web_panel():
     except ImportError:
         logger.warning("uvicorn/fastapi not installed — web panel disabled")
 
+
 # точка входа
 async def main():
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        logger.error("BOT_TOKEN не задан! Укажи его в переменных окружения Railway.")
+        logger.error("BOT_TOKEN не задан!")
         sys.exit(1)
 
+    import database
     if DB_TYPE == "postgres":
         import database_pg as db_module
-        import database
         for attr in dir(db_module):
             if not attr.startswith("_"):
                 setattr(database, attr, getattr(db_module, attr))
@@ -65,12 +59,12 @@ async def main():
     else:
         logger.info("Using SQLite database")
 
+    await database.init_db()
+    logger.info(f"Bot started (mode={BOT_MODE}, db={DB_TYPE})")
+
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-
-    await init_db()
-    logger.info(f"Bot started (mode={BOT_MODE}, db={DB_TYPE})")
 
     asyncio.create_task(reminder_loop(bot))
     await start_web_panel()
@@ -97,6 +91,7 @@ async def main():
         await dp.start_polling(bot, allowed_updates=[
             "message", "callback_query", "my_chat_member", "chat_member"
         ])
+
 
 if __name__ == "__main__":
     asyncio.run(main())
