@@ -46,6 +46,9 @@ class ResetNick(StatesGroup):
 class SetRemind(StatesGroup):
     minutes = State()
 
+class BroadcastState(StatesGroup):
+    text = State()
+
 # проверяем является ли юзер админом — Telegram-права, бот-права или владелец
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     from config import BOT_OWNER_ID
@@ -1374,6 +1377,118 @@ async def cmd_admins(message: Message):
         lines.append(f"• {name}{username} — <code>{a['user_id']}</code>")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+
+# рассылка сообщений от имени бота — только для владельца
+@router.message(Command("broadcast"))
+async def cmd_broadcast(message: Message, state: FSMContext):
+    from config import BOT_OWNER_ID
+    if message.from_user.id != BOT_OWNER_ID:
+        await message.answer("❌ Только владелец бота.")
+        return
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👥 Всем пользователям", callback_data="broadcast_all"),
+            InlineKeyboardButton(text="💬 В группу", callback_data="broadcast_group"),
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")],
+    ])
+    await message.answer(
+        "📢 <b>Рассылка</b>\n\nКуда отправить сообщение?",
+        reply_markup=kb, parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "broadcast_all")
+async def cb_broadcast_all(call: CallbackQuery, state: FSMContext):
+    from config import BOT_OWNER_ID
+    if call.from_user.id != BOT_OWNER_ID:
+        await call.answer("❌", show_alert=True)
+        return
+    await state.update_data(broadcast_mode="all")
+    await call.message.edit_text(
+        "📢 Напиши сообщение — оно уйдёт всем пользователям которые писали боту:",
+        reply_markup=cancel_keyboard()
+    )
+    await state.set_state(BroadcastState.text)
+    await call.answer()
+
+
+@router.callback_query(F.data == "broadcast_group")
+async def cb_broadcast_group(call: CallbackQuery, state: FSMContext):
+    from config import BOT_OWNER_ID
+    if call.from_user.id != BOT_OWNER_ID:
+        await call.answer("❌", show_alert=True)
+        return
+
+    chats = await db.get_known_chats()
+    if not chats:
+        await call.answer("Нет известных групп.", show_alert=True)
+        return
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    buttons = [[InlineKeyboardButton(
+        text=f"💬 {c.get('title') or c['chat_id']}",
+        callback_data=f"broadcast_to:{c['chat_id']}"
+    )] for c in chats]
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")])
+    await call.message.edit_text(
+        "💬 Выбери группу:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("broadcast_to:"))
+async def cb_broadcast_to_group(call: CallbackQuery, state: FSMContext):
+    from config import BOT_OWNER_ID
+    if call.from_user.id != BOT_OWNER_ID:
+        await call.answer("❌", show_alert=True)
+        return
+    chat_id = int(call.data.split(":")[1])
+    await state.update_data(broadcast_mode="group", broadcast_chat_id=chat_id)
+    await call.message.edit_text(
+        "📢 Напиши сообщение — оно уйдёт в выбранную группу:",
+        reply_markup=cancel_keyboard()
+    )
+    await state.set_state(BroadcastState.text)
+    await call.answer()
+
+
+@router.message(BroadcastState.text)
+async def fsm_broadcast_text(message: Message, state: FSMContext):
+    from config import BOT_OWNER_ID
+    if message.from_user.id != BOT_OWNER_ID:
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    mode = data.get("broadcast_mode")
+    text = message.text or message.caption or ""
+    await state.clear()
+
+    if mode == "all":
+        users = await db.get_all_users()
+        sent, failed = 0, 0
+        for user_id in users:
+            try:
+                await message.bot.send_message(user_id, text, parse_mode="HTML")
+                sent += 1
+            except Exception:
+                failed += 1
+        await message.answer(
+            f"✅ Рассылка завершена.\n\nОтправлено: {sent}\nНе доставлено: {failed}"
+        )
+
+    elif mode == "group":
+        chat_id = data.get("broadcast_chat_id")
+        try:
+            await message.bot.send_message(chat_id, text, parse_mode="HTML")
+            await message.answer("✅ Сообщение отправлено в группу.")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):

@@ -657,3 +657,10 @@ async def get_bot_admins(chat_id: int) -> list[dict]:
             WHERE b.chat_id = ?
         """, (chat_id,))
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_all_users() -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT user_id FROM user_profiles WHERE dm_available = 1")
+        return [r[0] for r in await cur.fetchall()]
