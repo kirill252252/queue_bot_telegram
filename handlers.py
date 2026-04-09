@@ -680,6 +680,7 @@ async def cmd_queue(message: Message):
     await message.answer(format_queue_list(queues),
                          reply_markup=queue_list_keyboard(queues, admin),
                          parse_mode="HTML")
+    await db.register_user_chat(message.from_user.id, message.chat.id)
 
 @router.callback_query(F.data == "back_to_list")
 async def cb_back_to_list(call: CallbackQuery):

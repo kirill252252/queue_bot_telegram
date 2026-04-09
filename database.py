@@ -668,9 +668,30 @@ async def get_all_users() -> list[int]:
 
 async def get_user_known_chats(user_id: int) -> list[int]:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("""
-            SELECT DISTINCT q.chat_id FROM queue_members qm
-            JOIN queues q ON q.id = qm.queue_id
-            WHERE qm.user_id = ?
-        """, (user_id,))
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_chats (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        cur = await db.execute(
+            "SELECT chat_id FROM user_chats WHERE user_id = ?", (user_id,))
         return [r[0] for r in await cur.fetchall()]
+    
+async def register_user_chat(user_id: int, chat_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_chats (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        try:
+            await db.execute(
+                "INSERT INTO user_chats (user_id, chat_id) VALUES (?, ?)",
+                (user_id, chat_id))
+            await db.commit()
+        except Exception:
+            pass    
