@@ -118,6 +118,13 @@ async def init_db():
         await conn.execute("""
             ALTER TABLE reminder_tasks ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'remind'
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_chats (
+                user_id BIGINT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
 
 
 # ─── All functions mirror database.py exactly ────────────────────────────────
@@ -618,4 +625,21 @@ async def get_user_known_chats(user_id: int) -> list[int]:
             JOIN queues q ON q.id = qm.queue_id
             WHERE qm.user_id = $1
         """, user_id)
+        return [r['chat_id'] for r in rows]
+    
+async def register_user_chat(user_id: int, chat_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                "INSERT INTO user_chats (user_id, chat_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+                user_id, chat_id)
+        except Exception:
+            pass
+
+async def get_user_known_chats(user_id: int) -> list[int]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT chat_id FROM user_chats WHERE user_id = $1", user_id)
         return [r['chat_id'] for r in rows]
