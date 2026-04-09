@@ -248,7 +248,10 @@ async def cb_pm_queue(call: CallbackQuery):
     is_subscribed = await db.is_subscribed(queue_id, call.from_user.id)
     kb = pm_queue_actions_keyboard(queue_id, user_in, not queue["is_active"],
                                    queue["chat_id"], user_is_first, is_full, is_subscribed)
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
     await call.answer()
 
 @router.callback_query(F.data.startswith("pm_join:"))
