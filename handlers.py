@@ -83,8 +83,10 @@ async def get_all_queues_for_pm(user_id: int) -> list[dict]:
     known_chats = await db.get_known_chats()
     for c in known_chats:
         _chat_names.setdefault(c["chat_id"], c["title"])
-    known_chat_ids = list(_chat_names.keys())
-    return await db.get_all_active_queues_for_known_chats(known_chat_ids)
+    user_chat_ids = await db.get_user_known_chats(user_id)
+    if not user_chat_ids:
+        return []
+    return await db.get_all_active_queues_for_known_chats(user_chat_ids)
 
 @router.errors()
 async def error_handler(event: ErrorEvent):
