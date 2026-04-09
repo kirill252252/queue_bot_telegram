@@ -664,3 +664,13 @@ async def get_all_users() -> list[int]:
         cur = await db.execute(
             "SELECT user_id FROM user_profiles WHERE dm_available = 1")
         return [r[0] for r in await cur.fetchall()]
+
+
+async def get_user_known_chats(user_id: int) -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("""
+            SELECT DISTINCT q.chat_id FROM queue_members qm
+            JOIN queues q ON q.id = qm.queue_id
+            WHERE qm.user_id = ?
+        """, (user_id,))
+        return [r[0] for r in await cur.fetchall()]

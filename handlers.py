@@ -185,10 +185,10 @@ async def _show_pm_start(message: Message):
         await message.answer(
             header +
             "😕 <b>Активных очередей не найдено.</b>\n\n"
-            "Что нужно сделать:\n"
-            "1. Добавь меня в группу\n"
-            "2. Напиши в группе /queue\n"
-            "3. Вернись сюда",
+            "Очереди появятся здесь когда ты встанешь в одну из них.\n\n"
+            "Как записаться:\n"
+            "• Попроси администратора скинуть ссылку-приглашение\n"
+            "• Или зайди в группу и напиши /queue",
             reply_markup=pm_main_keyboard(has_queues=False),
             parse_mode="HTML"
         )
@@ -206,7 +206,10 @@ async def cb_pm_start(call: CallbackQuery):
     if not queues:
         await call.message.edit_text(
             "😕 <b>Активных очередей не найдено.</b>\n\n"
-            "Зайди в группу и напиши /queue чтобы создать очередь.",
+            "Очереди появятся здесь когда ты встанешь в одну из них.\n\n"
+            "Как записаться:\n"
+            "• Попроси администратора скинуть ссылку-приглашение\n"
+            "• Или зайди в группу и напиши /queue",
             reply_markup=pm_main_keyboard(has_queues=False),
             parse_mode="HTML"
         )
@@ -255,6 +258,23 @@ async def cb_pm_join(call: CallbackQuery):
     if not queue or not queue["is_active"]:
         await call.answer("Очередь закрыта.", show_alert=True)
         return
+
+    # проверяем что пользователь состоит в группе
+    try:
+        chat_member = await call.bot.get_chat_member(queue["chat_id"], call.from_user.id)
+        if chat_member.status in ("left", "kicked", "restricted"):
+            await call.answer(
+                "❌ Ты не состоишь в этой группе.\nВступи в группу и попробуй снова.",
+                show_alert=True
+            )
+            return
+    except Exception:
+        await call.answer(
+            "❌ Не удалось проверить членство в группе.",
+            show_alert=True
+        )
+        return
+
     if queue["max_slots"] > 0 and await db.get_member_count(queue_id) >= queue["max_slots"]:
         await call.answer("😔 Все места заняты!", show_alert=True)
         return
