@@ -101,7 +101,6 @@ async def init_db():
             ("remind_timeout_min", "INTEGER DEFAULT 5"),
             ("notify_leave_public", "INTEGER DEFAULT 1"),
             ("auto_kick", "INTEGER DEFAULT 1"),
-            ("frozen_until", "TIMESTAMP"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE queues ADD COLUMN {col} {defn}")

@@ -74,10 +74,6 @@ async def after_leave(bot: Bot, queue_id: int, left_user_id: int,
     await db.cancel_reminders(queue_id, left_user_id)
     return queue, members
 
-def all_known_queues() -> list[dict]:
-
-    return []
-
 # берём все очереди из известных чатов для меню в личке
 async def get_all_queues_for_pm(user_id: int) -> list[dict]:
     known_chats = await db.get_known_chats()
