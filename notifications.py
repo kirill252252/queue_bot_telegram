@@ -10,6 +10,11 @@ from config import NOTIFY_APPROACHING
 
 logger = logging.getLogger(__name__)
 
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
 # отправляем сообщение в личку, не падаем если бот заблокирован
 async def safe_dm(bot: Bot, user_id: int, text: str, **kwargs) -> bool:
     try:
@@ -87,7 +92,9 @@ async def notify_kicked(bot: Bot, queue: dict, user_id: int, by_timeout: bool = 
     )
 
 async def notify_leave_public(bot: Bot, queue: dict, member: dict, chat_id: int):
-    if not queue.get("notify_leave_public", True):
+    if not queue:
+        return
+    if not _as_bool(queue.get("notify_leave_public", True)):
         return
     name = member["display_name"]
     username = member.get("username")

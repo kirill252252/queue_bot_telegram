@@ -7,6 +7,7 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import ChatMemberUpdated
 from aiogram.types import ErrorEvent
 
@@ -29,6 +30,42 @@ router = Router()
 
 # словарь chat_id -> название чата, живёт в памяти
 _chat_names: dict[int, str] = {}
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+def _is_message_not_modified_error(error: TelegramBadRequest) -> bool:
+    message = getattr(error, "message", None) or str(error)
+    return "message is not modified" in message.lower()
+
+async def safe_edit_text(message: Message, text: str, **kwargs) -> bool:
+    try:
+        await message.edit_text(text, **kwargs)
+        return True
+    except TelegramBadRequest as e:
+        if _is_message_not_modified_error(e):
+            return False
+        raise
+
+async def safe_bot_edit_text(bot: Bot, text: str, **kwargs) -> bool:
+    try:
+        await bot.edit_message_text(text=text, **kwargs)
+        return True
+    except TelegramBadRequest as e:
+        if _is_message_not_modified_error(e):
+            return False
+        raise
+
+async def safe_edit_reply_markup(message: Message, **kwargs) -> bool:
+    try:
+        await message.edit_reply_markup(**kwargs)
+        return True
+    except TelegramBadRequest as e:
+        if _is_message_not_modified_error(e):
+            return False
+        raise
 
 class CreateQueue(StatesGroup):
     name       = State()
@@ -202,7 +239,7 @@ async def _show_pm_start(message: Message):
 async def cb_pm_start(call: CallbackQuery):
     queues = await get_all_queues_for_pm(call.from_user.id)
     if not queues:
-        await call.message.edit_text(
+        await safe_edit_text(call.message, 
             "😕 <b>Активных очередей не найдено.</b>\n\n"
             "Очереди появятся здесь когда ты встанешь в одну из них.\n\n"
             "Как записаться:\n"
@@ -213,7 +250,7 @@ async def cb_pm_start(call: CallbackQuery):
         )
     else:
         kb = pm_chat_select_keyboard(queues, _chat_names)
-        await call.message.edit_text("👇 <b>Выбери группу:</b>", reply_markup=kb, parse_mode="HTML")
+        await safe_edit_text(call.message, "👇 <b>Выбери группу:</b>", reply_markup=kb, parse_mode="HTML")
     await call.answer()
 
 @router.callback_query(F.data.startswith("pm_chat:"))
@@ -225,7 +262,7 @@ async def cb_pm_chat(call: CallbackQuery):
         await call.answer("В этой группе нет активных очередей.", show_alert=True)
         return
     kb = pm_queue_select_keyboard(queues, chat_id)
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"💬 <b>{chat_name}</b>\n\nВыбери очередь:",
         reply_markup=kb, parse_mode="HTML"
     )
@@ -247,7 +284,7 @@ async def cb_pm_queue(call: CallbackQuery):
     kb = pm_queue_actions_keyboard(queue_id, user_in, not queue["is_active"],
                                    queue["chat_id"], user_is_first, is_full, is_subscribed)
     try:
-        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
     except Exception:
         pass
     await call.answer()
@@ -297,7 +334,7 @@ async def cb_pm_join(call: CallbackQuery):
     text = format_queue_info(queue, members)
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
     kb = pm_queue_actions_keyboard(queue_id, True, False, queue["chat_id"], user_is_first)
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("pm_leave:"))
 async def cb_pm_leave(call: CallbackQuery):
@@ -315,7 +352,7 @@ async def cb_pm_leave(call: CallbackQuery):
     queue, members = await after_leave(call.bot, queue_id, call.from_user.id, left, was_first)
     text = format_queue_info(queue, members)
     kb = pm_queue_actions_keyboard(queue_id, False, not queue["is_active"], queue["chat_id"])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("confirm_ready:"))
 async def cb_confirm_ready(call: CallbackQuery):
@@ -328,7 +365,7 @@ async def cb_confirm_ready(call: CallbackQuery):
     pos = member["position"] if member else "?"
     name = queue["name"] if queue else "очередь"
 
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"✅ Отлично! Ты подтвердил готовность (место #{pos}) в очереди <b>«{name}»</b>.\n\n"
         f"Когда закончишь — нажми «Выйти» в боте или в группе.",
         parse_mode="HTML"
@@ -341,7 +378,7 @@ async def cb_confirm_leave(call: CallbackQuery):
     members_before = await db.get_queue_members(queue_id)
     left = next((m for m in members_before if m["user_id"] == call.from_user.id), None)
     if not left:
-        await call.message.edit_text("Тебя уже нет в этой очереди.")
+        await safe_edit_text(call.message, "Тебя уже нет в этой очереди.")
         await call.answer()
         return
     was_first = left["position"] == 1
@@ -353,7 +390,7 @@ async def cb_confirm_leave(call: CallbackQuery):
     if was_first and members:
         await notify_became_first(call.bot, queue, members[0], queue["chat_id"])
     await db.cancel_reminders(queue_id, call.from_user.id)
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"🚪 Ты вышел из очереди <b>«{queue['name']}»</b>. Спасибо!",
         parse_mode="HTML"
     )
@@ -377,7 +414,7 @@ async def cb_done_next(call: CallbackQuery):
     if was_first and members:
         await notify_became_first(call.bot, queue, members[0], queue["chat_id"])
     await call.answer("✅ Отлично! Следующий уведомлён.", show_alert=True)
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"✅ <b>Ты прошёл очередь «{queue['name']}»!</b>\n\nСпасибо, следующий уведомлён 🎉",
         parse_mode="HTML"
     )
@@ -404,7 +441,7 @@ async def cb_pm_home(call: CallbackQuery):
             f"Нажми «Найти очередь» чтобы записаться."
         )
 
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         text,
         reply_markup=pm_main_keyboard(has_queues=has_queues),
         parse_mode="HTML"
@@ -436,7 +473,7 @@ async def cb_pm_myqueues(call: CallbackQuery):
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="pm_home")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         "\n\n".join(lines),
         reply_markup=kb,
         parse_mode="HTML"
@@ -510,7 +547,7 @@ async def _show_me(message_or_call, user_id: int, edit: bool = False):
     text = "\n".join(lines)
     kb = me_keyboard(has_nick)
     if edit:
-        await message_or_call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await safe_edit_text(message_or_call.message, text, reply_markup=kb, parse_mode="HTML")
     else:
         await message_or_call.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -530,7 +567,7 @@ async def cb_set_nick_choose_group(call: CallbackQuery, state: FSMContext):
         await call.answer("Нет доступных групп.", show_alert=True)
         return
     kb = nick_group_select_keyboard(queues, _chat_names, "set")
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         "✏️ Для какой группы установить ник?", reply_markup=kb
     )
     await state.set_state(SetNick.choosing_group)
@@ -541,7 +578,7 @@ async def cb_set_nick_group_chosen(call: CallbackQuery, state: FSMContext):
     chat_id = int(call.data.split(":")[1])
     gname = _chat_names.get(chat_id, f"Чат {chat_id}")
     await state.update_data(chat_id=chat_id, msg_id=call.message.message_id)
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"✏️ Ник для <b>{gname}</b>\n\nВведи ник (до 32 символов):",
         reply_markup=cancel_keyboard(), parse_mode="HTML"
     )
@@ -558,7 +595,7 @@ async def fsm_set_nick(message: Message, state: FSMContext):
     await db.set_group_nick(message.from_user.id, data["chat_id"], nick)
     await state.clear()
     gname = _chat_names.get(data["chat_id"], f"Чат {data['chat_id']}")
-    await message.bot.edit_message_text(
+    await safe_bot_edit_text(message.bot, 
         f"✅ Ник <b>{nick}</b> установлен для группы <b>{gname}</b>.\n\n"
         f"Он будет использован при следующем входе в очередь этой группы.",
         chat_id=message.chat.id, message_id=data["msg_id"],
@@ -585,7 +622,7 @@ async def cb_reset_nick_choose_group(call: CallbackQuery, state: FSMContext):
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="show_me")])
     from aiogram.types import InlineKeyboardMarkup
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await call.message.edit_text("🗑 Для какой группы сбросить ник?", reply_markup=kb)
+    await safe_edit_text(call.message, "🗑 Для какой группы сбросить ник?", reply_markup=kb)
     await state.set_state(ResetNick.choosing_group)
     await call.answer()
 
@@ -682,9 +719,10 @@ async def cmd_queue(message: Message):
 async def cb_back_to_list(call: CallbackQuery):
     queues = await db.get_chat_queues(call.message.chat.id)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    await call.message.edit_text(format_queue_list(queues),
-                                 reply_markup=queue_list_keyboard(queues, admin),
-                                 parse_mode="HTML")
+    await safe_edit_text(call.message, format_queue_list(queues),
+                         reply_markup=queue_list_keyboard(queues, admin),
+                         parse_mode="HTML")
+    await call.answer()
 
 @router.callback_query(F.data.startswith("view_queue:"))
 async def cb_view_queue(call: CallbackQuery):
@@ -696,9 +734,12 @@ async def cb_view_queue(call: CallbackQuery):
     members = await db.get_queue_members(queue_id)
     user_in = any(m["user_id"] == call.from_user.id for m in members)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    await call.message.edit_text(format_queue_info(queue, members),
-                                 reply_markup=queue_actions_keyboard(queue_id, user_in, admin, not queue["is_active"]),
-                                 parse_mode="HTML")
+    await safe_edit_text(
+        call.message,
+        format_queue_info(queue, members),
+        reply_markup=queue_actions_keyboard(queue_id, user_in, admin, not queue["is_active"]),
+        parse_mode="HTML"
+    )
     await call.answer()
 
 @router.callback_query(F.data.startswith("join:"))
@@ -733,7 +774,7 @@ async def cb_join(call: CallbackQuery):
 
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
-    await call.message.edit_text(format_queue_info(queue, members),
+    await safe_edit_text(call.message, format_queue_info(queue, members),
                                  reply_markup=queue_actions_keyboard(queue_id, True, admin, False, user_is_first),
                                  parse_mode="HTML")
 
@@ -756,7 +797,7 @@ async def cb_leave(call: CallbackQuery):
         await notify_slot_available(call.bot, queue)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
-    await call.message.edit_text(format_queue_info(queue, members),
+    await safe_edit_text(call.message, format_queue_info(queue, members),
                                  reply_markup=queue_actions_keyboard(queue_id, False, admin, not queue["is_active"], user_is_first),
                                  parse_mode="HTML")
 
@@ -766,7 +807,7 @@ async def cb_create_queue(call: CallbackQuery, state: FSMContext):
         await call.answer("❌ Только администраторы.", show_alert=True)
         return
     await state.update_data(chat_id=call.message.chat.id, msg_id=call.message.message_id)
-    await call.message.edit_text("📝 <b>Новая очередь</b>\n\nНазвание:",
+    await safe_edit_text(call.message, "📝 <b>Новая очередь</b>\n\nНазвание:",
                                  reply_markup=cancel_keyboard(), parse_mode="HTML")
     await state.set_state(CreateQueue.name)
     await call.answer()
@@ -779,7 +820,7 @@ async def fsm_name(message: Message, state: FSMContext):
         return
     await state.update_data(name=name)
     d = await state.get_data()
-    await message.bot.edit_message_text(
+    await safe_bot_edit_text(message.bot, 
         f"📝 <b>{name}</b>\n\nОписание (или «-» пропустить):",
         chat_id=message.chat.id, message_id=d["msg_id"],
         reply_markup=cancel_keyboard(), parse_mode="HTML")
@@ -790,7 +831,7 @@ async def fsm_desc(message: Message, state: FSMContext):
     desc = message.text.strip()
     await state.update_data(description=None if desc == "-" else desc)
     d = await state.get_data()
-    await message.bot.edit_message_text(
+    await safe_bot_edit_text(message.bot, 
         "Макс. мест (0 = без ограничений):",
         chat_id=message.chat.id, message_id=d["msg_id"],
         reply_markup=cancel_keyboard())
@@ -806,7 +847,7 @@ async def fsm_slots(message: Message, state: FSMContext):
         return
     await state.update_data(max_slots=slots)
     d = await state.get_data()
-    await message.bot.edit_message_text(
+    await safe_bot_edit_text(message.bot, 
         "⏱ Через сколько минут напоминать #1 / авто-кик? (1–60, рекомендую 5):",
         chat_id=message.chat.id, message_id=d["msg_id"],
         reply_markup=cancel_keyboard())
@@ -829,7 +870,7 @@ async def fsm_remind(message: Message, state: FSMContext):
     )
     await state.clear()
     queue = await db.get_queue(queue_id)
-    await message.bot.edit_message_text(
+    await safe_bot_edit_text(message.bot, 
         format_queue_info(queue, []),
         chat_id=d["chat_id"], message_id=d["msg_id"],
         reply_markup=queue_actions_keyboard(queue_id, False, True, False),
@@ -839,12 +880,12 @@ async def fsm_remind(message: Message, state: FSMContext):
 async def cb_cancel(call: CallbackQuery, state: FSMContext):
     await state.clear()
     if call.message.chat.type == "private":
-        await call.message.edit_text("Отменено.")
+        await safe_edit_text(call.message, "Отменено.")
         await call.answer()
         return
     queues = await db.get_chat_queues(call.message.chat.id)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    await call.message.edit_text(format_queue_list(queues),
+    await safe_edit_text(call.message, format_queue_list(queues),
                                  reply_markup=queue_list_keyboard(queues, admin),
                                  parse_mode="HTML")
     await call.answer("Отменено")
@@ -856,11 +897,11 @@ async def cb_queue_settings(call: CallbackQuery):
         await call.answer("❌ Только администраторы.", show_alert=True)
         return
     q = await db.get_queue(queue_id)
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"⚙️ <b>Настройки «{q['name']}»</b>",
         reply_markup=queue_settings_keyboard(
-            queue_id, bool(q["notify_leave_public"]),
-            q["remind_timeout_min"], bool(q["auto_kick"])
+            queue_id, _as_bool(q["notify_leave_public"]),
+            q["remind_timeout_min"], _as_bool(q["auto_kick"])
         ), parse_mode="HTML")
     await call.answer()
 
@@ -871,12 +912,12 @@ async def cb_toggle_leave(call: CallbackQuery):
         await call.answer("❌", show_alert=True)
         return
     q = await db.get_queue(queue_id)
-    new = not bool(q["notify_leave_public"])
-    await db.update_queue_settings(queue_id, q["remind_timeout_min"], new, bool(q["auto_kick"]))
+    new = not _as_bool(q["notify_leave_public"])
+    await db.update_queue_settings(queue_id, q["remind_timeout_min"], new, _as_bool(q["auto_kick"]))
     q = await db.get_queue(queue_id)
-    await call.message.edit_reply_markup(
-        reply_markup=queue_settings_keyboard(queue_id, bool(q["notify_leave_public"]),
-                                             q["remind_timeout_min"], bool(q["auto_kick"])))
+    await safe_edit_reply_markup(call.message,
+        reply_markup=queue_settings_keyboard(queue_id, _as_bool(q["notify_leave_public"]),
+                                             q["remind_timeout_min"], _as_bool(q["auto_kick"])))
     await call.answer("Анонсы выхода " + ("включены." if new else "выключены."))
 
 @router.callback_query(F.data.startswith("toggle_autokick:"))
@@ -886,12 +927,12 @@ async def cb_toggle_autokick(call: CallbackQuery):
         await call.answer("❌", show_alert=True)
         return
     q = await db.get_queue(queue_id)
-    new = not bool(q["auto_kick"])
-    await db.update_queue_settings(queue_id, q["remind_timeout_min"], bool(q["notify_leave_public"]), new)
+    new = not _as_bool(q["auto_kick"])
+    await db.update_queue_settings(queue_id, q["remind_timeout_min"], _as_bool(q["notify_leave_public"]), new)
     q = await db.get_queue(queue_id)
-    await call.message.edit_reply_markup(
-        reply_markup=queue_settings_keyboard(queue_id, bool(q["notify_leave_public"]),
-                                             q["remind_timeout_min"], bool(q["auto_kick"])))
+    await safe_edit_reply_markup(call.message,
+        reply_markup=queue_settings_keyboard(queue_id, _as_bool(q["notify_leave_public"]),
+                                             q["remind_timeout_min"], _as_bool(q["auto_kick"])))
     await call.answer("Авто-кик " + ("включён." if new else "выключен."))
 
 @router.callback_query(F.data.startswith("set_remind:"))
@@ -901,7 +942,7 @@ async def cb_set_remind(call: CallbackQuery, state: FSMContext):
         await call.answer("❌", show_alert=True)
         return
     await state.update_data(queue_id=queue_id, msg_id=call.message.message_id)
-    await call.message.edit_text("⏱ Введи таймаут в минутах (1–60):",
+    await safe_edit_text(call.message, "⏱ Введи таймаут в минутах (1–60):",
                                  reply_markup=cancel_keyboard())
     await state.set_state(SetRemind.minutes)
     await call.answer()
@@ -917,14 +958,14 @@ async def fsm_remind_set(message: Message, state: FSMContext):
     d = await state.get_data()
     queue_id = d["queue_id"]
     q = await db.get_queue(queue_id)
-    await db.update_queue_settings(queue_id, mins, bool(q["notify_leave_public"]), bool(q["auto_kick"]))
+    await db.update_queue_settings(queue_id, mins, _as_bool(q["notify_leave_public"]), _as_bool(q["auto_kick"]))
     await state.clear()
     q = await db.get_queue(queue_id)
-    await message.bot.edit_message_text(
+    await safe_bot_edit_text(message.bot, 
         f"⚙️ <b>Настройки «{q['name']}»</b>",
         chat_id=message.chat.id, message_id=d["msg_id"],
-        reply_markup=queue_settings_keyboard(queue_id, bool(q["notify_leave_public"]),
-                                             q["remind_timeout_min"], bool(q["auto_kick"])),
+        reply_markup=queue_settings_keyboard(queue_id, _as_bool(q["notify_leave_public"]),
+                                             q["remind_timeout_min"], _as_bool(q["auto_kick"])),
         parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("close_queue:"))
@@ -933,7 +974,7 @@ async def cb_close(call: CallbackQuery):
     if not await is_admin(call.bot, call.message.chat.id, call.from_user.id):
         await call.answer("❌", show_alert=True)
         return
-    await call.message.edit_text("🔒 Закрыть очередь?",
+    await safe_edit_text(call.message, "🔒 Закрыть очередь?",
                                  reply_markup=confirm_keyboard("close", queue_id))
 
 @router.callback_query(F.data.startswith("confirm_close:"))
@@ -943,7 +984,7 @@ async def cb_confirm_close(call: CallbackQuery):
     await call.answer("🔒 Закрыта.", show_alert=True)
     q = await db.get_queue(queue_id)
     members = await db.get_queue_members(queue_id)
-    await call.message.edit_text(format_queue_info(q, members),
+    await safe_edit_text(call.message, format_queue_info(q, members),
                                  reply_markup=queue_actions_keyboard(queue_id, False, True, True),
                                  parse_mode="HTML")
 
@@ -953,7 +994,7 @@ async def cb_delete(call: CallbackQuery):
     if not await is_admin(call.bot, call.message.chat.id, call.from_user.id):
         await call.answer("❌", show_alert=True)
         return
-    await call.message.edit_text("🗑 <b>Удалить очередь?</b> Это необратимо.",
+    await safe_edit_text(call.message, "🗑 <b>Удалить очередь?</b> Это необратимо.",
                                  reply_markup=confirm_keyboard("delete", queue_id),
                                  parse_mode="HTML")
 
@@ -964,7 +1005,7 @@ async def cb_confirm_delete(call: CallbackQuery):
     await call.answer("🗑 Удалена.", show_alert=True)
     queues = await db.get_chat_queues(call.message.chat.id)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    await call.message.edit_text(format_queue_list(queues),
+    await safe_edit_text(call.message, format_queue_list(queues),
                                  reply_markup=queue_list_keyboard(queues, admin),
                                  parse_mode="HTML")
 
@@ -978,7 +1019,7 @@ async def cb_kick_menu(call: CallbackQuery):
     if not members:
         await call.answer("Очередь пуста.", show_alert=True)
         return
-    await call.message.edit_text("👢 Выбери участника:",
+    await safe_edit_text(call.message, "👢 Выбери участника:",
                                  reply_markup=kick_members_keyboard(queue_id, members))
     await call.answer()
 
@@ -1003,7 +1044,7 @@ async def cb_kick(call: CallbackQuery):
     members = await db.get_queue_members(queue_id)
     if was_first and members:
         await notify_became_first(call.bot, queue, members[0], call.message.chat.id)
-    await call.message.edit_text(format_queue_info(queue, members),
+    await safe_edit_text(call.message, format_queue_info(queue, members),
                                  reply_markup=queue_actions_keyboard(queue_id, False, True, not queue["is_active"]),
                                  parse_mode="HTML")
 
@@ -1117,7 +1158,7 @@ async def cb_freeze_menu(call: CallbackQuery):
         await call.answer("Ты уже заморожен. Сначала разморозься.", show_alert=True)
         return
     queue = await db.get_queue(queue_id)
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"🧊 <b>Заморозка места в «{queue['name']}»</b>\n\n"
         f"Ты временно выйдешь из уведомлений, но сохранишь позицию #{member['position']}.\n"
         f"На сколько заморозить?",
@@ -1143,7 +1184,7 @@ async def cb_freeze(call: CallbackQuery):
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
     kb = pm_queue_actions_keyboard(queue_id, True, not queue["is_active"],
                                    queue["chat_id"], user_is_first)
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("unfreeze:"))
 async def cb_unfreeze(call: CallbackQuery):
@@ -1157,7 +1198,7 @@ async def cb_unfreeze(call: CallbackQuery):
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
     kb = pm_queue_actions_keyboard(queue_id, True, not queue["is_active"],
                                    queue["chat_id"], user_is_first)
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("swap_menu:"))
 # показываем список с кем можно поменяться
@@ -1173,7 +1214,7 @@ async def cb_swap_menu(call: CallbackQuery):
         await call.answer("Больше никого нет в очереди.", show_alert=True)
         return
     queue = await db.get_queue(queue_id)
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"🔀 <b>Обмен позицией в «{queue['name']}»</b>\n\n"
         f"Твоя позиция: <b>#{my_member['position']}</b>\n\n"
         f"С кем хочешь поменяться?",
@@ -1217,7 +1258,7 @@ async def cb_swap_request(call: CallbackQuery):
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
     kb = pm_queue_actions_keyboard(queue_id, True, not queue["is_active"],
                                    queue["chat_id"], user_is_first)
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("swap_accept:"))
 # принимаем обмен позициями
@@ -1225,19 +1266,19 @@ async def cb_swap_accept(call: CallbackQuery):
     request_id = int(call.data.split(":")[1])
     req = await db.get_swap_request(request_id)
     if not req or req["status"] != "pending":
-        await call.message.edit_text("❌ Запрос уже недействителен.")
+        await safe_edit_text(call.message, "❌ Запрос уже недействителен.")
         return
 
     success = await db.execute_swap(req["queue_id"], req["from_user"], req["to_user"])
     if not success:
-        await call.message.edit_text("❌ Не удалось выполнить обмен — кто-то уже вышел из очереди.")
+        await safe_edit_text(call.message, "❌ Не удалось выполнить обмен — кто-то уже вышел из очереди.")
         return
 
     queue = await db.get_queue(req["queue_id"])
     my_pos = (await db.get_member(req["queue_id"], call.from_user.id))["position"]
     their_pos = (await db.get_member(req["queue_id"], req["from_user"]))["position"]
 
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"✅ <b>Обмен выполнен!</b>\n\n"
         f"Твоя новая позиция: <b>#{my_pos}</b> в очереди «{queue['name']}».",
         parse_mode="HTML"
@@ -1260,11 +1301,11 @@ async def cb_swap_decline(call: CallbackQuery):
     request_id = int(call.data.split(":")[1])
     req = await db.get_swap_request(request_id)
     if not req:
-        await call.message.edit_text("Запрос не найден.")
+        await safe_edit_text(call.message, "Запрос не найден.")
         return
     await db.decline_swap(request_id)
     queue = await db.get_queue(req["queue_id"])
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         f"❌ Ты отклонил запрос на обмен в очереди «{queue['name'] if queue else '?'}»."
     )
     from notifications import safe_dm
@@ -1430,7 +1471,7 @@ async def cb_broadcast_all(call: CallbackQuery, state: FSMContext):
         await call.answer("❌", show_alert=True)
         return
     await state.update_data(broadcast_mode="all")
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         "📢 Напиши сообщение — оно уйдёт всем пользователям которые писали боту:",
         reply_markup=cancel_keyboard()
     )
@@ -1456,7 +1497,7 @@ async def cb_broadcast_group(call: CallbackQuery, state: FSMContext):
         callback_data=f"broadcast_to:{c['chat_id']}"
     )] for c in chats]
     buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")])
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         "💬 Выбери группу:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
@@ -1471,7 +1512,7 @@ async def cb_broadcast_to_group(call: CallbackQuery, state: FSMContext):
         return
     chat_id = int(call.data.split(":")[1])
     await state.update_data(broadcast_mode="group", broadcast_chat_id=chat_id)
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         "📢 Напиши сообщение — оно уйдёт в выбранную группу:",
         reply_markup=cancel_keyboard()
     )
@@ -1487,7 +1528,7 @@ async def cb_broadcast_user(call: CallbackQuery, state: FSMContext):
         await call.answer("❌", show_alert=True)
         return
     await state.update_data(broadcast_mode="user")
-    await call.message.edit_text(
+    await safe_edit_text(call.message, 
         "👤 Введи @username или user_id пользователя:",
         reply_markup=cancel_keyboard()
     )
