@@ -329,15 +329,17 @@ async def get_user_queue_memberships(user_id: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-async def create_reminder(queue_id: int, user_id: int, fire_at: str):
+async def create_reminder(queue_id: int, user_id: int, fire_at: str, kind: str = 'remind'):
+    from datetime import datetime
+    fire_dt = datetime.strptime(fire_at, "%Y-%m-%d %H:%M:%S")
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE reminder_tasks SET done=1 WHERE queue_id=$1 AND user_id=$2 AND done=0",
             queue_id, user_id)
         await conn.execute(
-            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at) VALUES ($1,$2,$3::timestamp)",
-            queue_id, user_id, fire_at)
+            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at) VALUES ($1,$2,$3)",
+            queue_id, user_id, fire_dt)
 
 
 async def get_due_reminders(now: str) -> list[dict]:
