@@ -143,6 +143,9 @@ def queue_actions_keyboard(queue_id: int, user_in: bool,
             InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"queue_settings:{queue_id}"),
             InlineKeyboardButton(text="📥 CSV",        callback_data=f"export:{queue_id}"),
         ])
+        buttons.append([
+            InlineKeyboardButton(text="📋 Создать по шаблону", callback_data=f"clone_queue:{queue_id}"),
+        ])
     buttons.append([
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"view_queue:{queue_id}"),
         InlineKeyboardButton(text="◀️ Назад",    callback_data="back_to_list"),

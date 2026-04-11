@@ -1489,7 +1489,7 @@ async def cb_broadcast_all(call: CallbackQuery, state: FSMContext):
         return
     await state.update_data(broadcast_mode="all")
     await safe_edit_text(call.message, 
-        "📢 Напиши сообщение — оно уйдёт всем пользователям которые писали боту:",
+        "📢 Напиши сообщение или отправь фото — оно уйдёт всем пользователям которые писали боту:",
         reply_markup=cancel_keyboard()
     )
     await state.set_state(BroadcastState.text)
@@ -1530,7 +1530,7 @@ async def cb_broadcast_to_group(call: CallbackQuery, state: FSMContext):
     chat_id = int(call.data.split(":")[1])
     await state.update_data(broadcast_mode="group", broadcast_chat_id=chat_id)
     await safe_edit_text(call.message, 
-        "📢 Напиши сообщение — оно уйдёт в выбранную группу:",
+        "📢 Напиши сообщение или отправь фото — оно уйдёт в выбранную группу:",
         reply_markup=cancel_keyboard()
     )
     await state.set_state(BroadcastState.text)
@@ -1575,7 +1575,7 @@ async def fsm_broadcast_target(message: Message, state: FSMContext):
     name = row.get("full_name") or row.get("username") or str(row["user_id"])
     await state.update_data(broadcast_target_id=row["user_id"], broadcast_target_name=name)
     await message.answer(
-        f"👤 Пользователь: <b>{name}</b>\n\nТеперь напиши сообщение:",
+        f"👤 Пользователь: <b>{name}</b>\n\nНапиши сообщение или отправь фото:",
         reply_markup=cancel_keyboard(),
         parse_mode="HTML"
     )
@@ -1591,14 +1591,22 @@ async def fsm_broadcast_text(message: Message, state: FSMContext):
     data = await state.get_data()
     mode = data.get("broadcast_mode")
     text = message.text or message.caption or ""
+    is_photo = bool(message.photo)
+    photo_id = message.photo[-1].file_id if is_photo else None
     await state.clear()
+
+    async def send_one(target_id: int):
+        if is_photo:
+            await message.bot.send_photo(target_id, photo_id, caption=text, parse_mode="HTML")
+        else:
+            await message.bot.send_message(target_id, text, parse_mode="HTML")
 
     if mode == "all":
         users = await db.get_all_users()
         sent, failed = 0, 0
         for user_id in users:
             try:
-                await message.bot.send_message(user_id, text, parse_mode="HTML")
+                await send_one(user_id)
                 sent += 1
             except Exception:
                 failed += 1
@@ -1609,7 +1617,7 @@ async def fsm_broadcast_text(message: Message, state: FSMContext):
     elif mode == "group":
         chat_id = data.get("broadcast_chat_id")
         try:
-            await message.bot.send_message(chat_id, text, parse_mode="HTML")
+            await send_one(chat_id)
             await message.answer("✅ Сообщение отправлено в группу.")
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
@@ -1618,10 +1626,41 @@ async def fsm_broadcast_text(message: Message, state: FSMContext):
         target_id = data.get("broadcast_target_id")
         target_name = data.get("broadcast_target_name", str(target_id))
         try:
-            await message.bot.send_message(target_id, text, parse_mode="HTML")
+            await send_one(target_id)
             await message.answer(f"✅ Сообщение отправлено пользователю <b>{target_name}</b>.", parse_mode="HTML")
         except Exception as e:
             await message.answer(f"❌ Не удалось отправить: {e}")
+
+
+@router.callback_query(F.data.startswith("clone_queue:"))
+async def cb_clone_queue(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, call.message.chat.id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    original = await db.get_queue(queue_id)
+    if not original:
+        await call.answer("Очередь не найдена.", show_alert=True)
+        return
+
+    new_id = await db.create_queue(
+        chat_id=original["chat_id"],
+        name=original["name"],
+        description=original.get("description"),
+        max_slots=original["max_slots"],
+        created_by=call.from_user.id,
+        remind_timeout_min=original.get("remind_timeout_min", 5),
+        notify_leave_public=bool(original.get("notify_leave_public", True)),
+        auto_kick=bool(original.get("auto_kick", True)),
+    )
+
+    await call.answer(f"✅ Создана новая очередь по шаблону «{original['name']}»!", show_alert=True)
+
+    new_queue = await db.get_queue(new_id)
+    text = format_queue_info(new_queue, [])
+    kb = queue_actions_keyboard(new_id, False, True, False)
+    await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
