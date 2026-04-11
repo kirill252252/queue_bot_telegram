@@ -820,6 +820,10 @@ async def fsm_name(message: Message, state: FSMContext):
         return
     await state.update_data(name=name)
     d = await state.get_data()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await safe_bot_edit_text(message.bot, 
         f"📝 <b>{name}</b>\n\nОписание (или «-» пропустить):",
         chat_id=message.chat.id, message_id=d["msg_id"],
@@ -831,6 +835,10 @@ async def fsm_desc(message: Message, state: FSMContext):
     desc = message.text.strip()
     await state.update_data(description=None if desc == "-" else desc)
     d = await state.get_data()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await safe_bot_edit_text(message.bot, 
         "Макс. мест (0 = без ограничений):",
         chat_id=message.chat.id, message_id=d["msg_id"],
@@ -847,6 +855,10 @@ async def fsm_slots(message: Message, state: FSMContext):
         return
     await state.update_data(max_slots=slots)
     d = await state.get_data()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await safe_bot_edit_text(message.bot, 
         "⏱ Через сколько минут напоминать #1 / авто-кик? (1–60, рекомендую 5):",
         chat_id=message.chat.id, message_id=d["msg_id"],
@@ -862,6 +874,10 @@ async def fsm_remind(message: Message, state: FSMContext):
         await message.answer("Введи число от 1 до 60:")
         return
     d = await state.get_data()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     queue_id = await db.create_queue(
         chat_id=d["chat_id"], name=d["name"],
         description=d.get("description"), max_slots=d["max_slots"],
@@ -1037,10 +1053,11 @@ async def cb_kick(call: CallbackQuery):
         await call.answer("Участник не найден.", show_alert=True)
         return
     was_first = left["position"] == 1
+    kicked_pos = left["position"]
     await db.kick_member(queue_id, user_id)
     await call.answer("👢 Удалён.", show_alert=True)
     queue = await db.get_queue(queue_id)
-    await notify_kicked(call.bot, queue, user_id, by_timeout=False)
+    await notify_kicked(call.bot, queue, user_id, by_timeout=False, position=kicked_pos)
     members = await db.get_queue_members(queue_id)
     if was_first and members:
         await notify_became_first(call.bot, queue, members[0], call.message.chat.id)
