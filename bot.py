@@ -12,10 +12,11 @@ from notifications import process_due_reminders
 from schedule_handlers import sched_router
 from schedule_manager import process_schedule_tick
 import schedule_db as sdb
-from schedule_handlers import schedule_router
 from schedule_monitor import schedule_loop
 from source_monitor import source_monitor_loop
-import schedule_db as sdb
+
+import database
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,7 +58,6 @@ async def main():
         logger.error("BOT_TOKEN не задан!")
         sys.exit(1)
 
-    import database
     if DB_TYPE == "postgres":
         import database_pg as db_module
         for attr in dir(db_module):
@@ -69,14 +69,14 @@ async def main():
 
     await database.init_db()
     await sdb.init_schedule_db()
-    await sdb.init_schedule_db()
+
     logger.info(f"Bot started (mode={BOT_MODE}, db={DB_TYPE})")
 
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
+
     dp.include_router(router)
     dp.include_router(sched_router)
-    dp.include_router(schedule_router)
 
     asyncio.create_task(reminder_loop(bot))
     asyncio.create_task(schedule_loop(bot))
