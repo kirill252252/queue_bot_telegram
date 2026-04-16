@@ -7,6 +7,9 @@ import logging
 import re
 import os
 from typing import Optional
+from aiogram import Router
+
+sched_router = Router()
 
 import aiohttp
 
