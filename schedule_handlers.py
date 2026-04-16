@@ -305,14 +305,16 @@ async def cb_schedule_skip(call: CallbackQuery):
         lines.append(f"\n👥 <b>{group['group_name']}</b>")
         for wd in range(1, 8):
             lessons = await sdb.get_lessons_for_day_full(group["id"], wd)
-            for lesson in lessons:
-                skip = bool(lesson.get("skip_queue", 0))
-                icon = "🔕" if skip else "🔔"
-                label = f"{icon} {weekday_name(wd)} {lesson['time_start']} — {lesson['subject']}"
-                buttons.append([InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"toggle_skip:{lesson['id']}:{chat_id}"
-                )])
+        for lesson in lessons:
+            skip = bool(lesson.get("skip_queue", 0))
+            icon = "🔕" if skip else "🔔"
+
+            label = f"{icon} {WEEKDAY_NAMES.get(wd, '')} {lesson['time_start']} — {lesson['subject']}"
+
+            buttons.append([InlineKeyboardButton(
+                text=label,
+                callback_data=f"toggle_skip:{lesson['id']}:{chat_id}"
+            )]) 
 
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"schedule_back:{chat_id}")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -392,7 +394,7 @@ async def cb_schedule_sources(call: CallbackQuery):
     await call.answer()
 
 
-@schedule_router.callback_query(F.data.startswith("add_source:"))
+@sched_router.callback_query(F.data.startswith("add_source:"))
 async def cb_add_source(call: CallbackQuery, state: FSMContext):
     parts = call.data.split(":")
     source_type, chat_id = parts[1], int(parts[2])
