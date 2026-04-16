@@ -10,6 +10,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from schedule_ui import schedule_main_keyboard
 
 import database as db
 import schedule_db as sdb
@@ -294,33 +295,45 @@ async def _apply_changes(message: Message, group: dict, changes: list[dict]):
 @sched_router.callback_query(F.data.startswith("schedule_skip:"))
 async def cb_schedule_skip(call: CallbackQuery):
     chat_id = int(call.data.split(":")[1])
+
     groups = await sdb.get_chat_groups(chat_id)
     if not groups:
         await call.answer("Расписание не загружено.", show_alert=True)
         return
 
-    lines = ["🔕 <b>Пары без очереди</b>\n\nВыбери пары которые НЕ должны создавать очередь:\n"]
+    lines = ["🔕 <b>Пары без очереди</b>\n"]
     buttons = []
+
     for group in groups:
         lines.append(f"\n👥 <b>{group['group_name']}</b>")
+
         for wd in range(1, 8):
             lessons = await sdb.get_lessons_for_day_full(group["id"], wd)
-        for lesson in lessons:
-            skip = bool(lesson.get("skip_queue", 0))
-            icon = "🔕" if skip else "🔔"
 
-            label = f"{icon} {WEEKDAY_NAMES.get(wd, '')} {lesson['time_start']} — {lesson['subject']}"
+            for lesson in lessons:
+                skip = bool(lesson.get("skip_queue", 0))
+                icon = "🔕" if skip else "🔔"
 
-            buttons.append([InlineKeyboardButton(
-                text=label,
-                callback_data=f"toggle_skip:{lesson['id']}:{chat_id}"
-            )]) 
+                label = f"{icon} {WEEKDAY_NAMES.get(wd, '')} {lesson['time_start']} — {lesson['subject']}"
 
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"schedule_back:{chat_id}")])
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await call.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode="HTML")
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=label,
+                        callback_data=f"toggle_skip:{lesson['id']}:{chat_id}"
+                    )
+                ])
+
+    buttons.append([
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"schedule_back:{chat_id}")
+    ])
+
+    await call.message.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML"
+    )
+
     await call.answer()
-
 
 @sched_router.callback_query(F.data.startswith("toggle_skip:"))
 async def cb_toggle_skip(call: CallbackQuery):
@@ -329,8 +342,12 @@ async def cb_toggle_skip(call: CallbackQuery):
 
     from database import DB_PATH
     import aiosqlite
+
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT skip_queue FROM schedule_lessons WHERE id=?", (lesson_id,))
+        cur = await db.execute(
+            "SELECT skip_queue FROM schedule_lessons WHERE id=?",
+            (lesson_id,)
+        )
         row = await cur.fetchone()
 
     if row is None:
@@ -339,15 +356,13 @@ async def cb_toggle_skip(call: CallbackQuery):
 
     new_val = not bool(row[0])
     await sdb.set_lesson_skip_queue(lesson_id, new_val)
+
     status = "🔕 без очереди" if new_val else "🔔 с очередью"
     await call.answer(f"Обновлено: {status}", show_alert=True)
 
-    # Refresh the list
-    await cb_schedule_skip.__wrapped__(call) if hasattr(cb_schedule_skip, '__wrapped__') else None
-    # Just re-trigger
+    # ОБНОВЛЯЕМ ОДИН РАЗ
     call.data = f"schedule_skip:{chat_id}"
     await cb_schedule_skip(call)
-
 
 # ─── Source management ────────────────────────────────────────────────────────
 
@@ -423,14 +438,21 @@ async def cb_add_source(call: CallbackQuery, state: FSMContext):
 @sched_router.message(SourceState.waiting_source)
 async def fsm_add_source(message: Message, state: FSMContext):
     data = await state.get_data()
-    source_type = data["source_type"]
-    chat_id = data["chat_id"]
+
+    source_type = data.get("source_type")
+    chat_id = data.get("chat_id")
+
+    if not source_type or not chat_id:
+        await state.clear()
+        return
+
     source_id = message.text.strip().lstrip("@")
 
     await sdb.add_source(chat_id, source_type, source_id)
     await state.clear()
 
     icon = "💬" if source_type == "telegram" else "🔵"
+
     await message.answer(
         f"✅ {icon} Источник <b>{source_id}</b> добавлен!\n\n"
         f"Бот будет проверять его каждые 15 минут.",
