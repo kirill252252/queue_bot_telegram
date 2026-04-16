@@ -12,14 +12,12 @@ from config import (
 
 from handlers import router
 from schedule_handlers import sched_router
+
 from notifications import process_due_reminders
 from schedule_manager import process_schedule_tick
-from schedule_monitor import schedule_loop
 from source_monitor import source_monitor_loop
 
-import database
 import schedule_db as sdb
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,18 +27,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# бесконечный цикл: фоновые задачи (напоминания + тик расписания)
-async def reminder_loop(bot: Bot):
+# ─────────────────────────────
+# БАЗА ДАННЫХ (FIXED)
+# ─────────────────────────────
+if DB_TYPE == "postgres":
+    import database_pg as db_impl
+    logger.info("Using PostgreSQL database")
+else:
+    import database as db_impl
+    logger.info("Using SQLite database")
+
+
+# ─────────────────────────────
+# BACKGROUND LOOP (ЕДИНЫЙ)
+# ─────────────────────────────
+async def background_loop(bot: Bot):
     while True:
         try:
             await process_due_reminders(bot)
             await process_schedule_tick(bot)
         except Exception as e:
-            logger.error(f"Reminder loop error: {e}")
+            logger.error(f"Background loop error: {e}")
+
         await asyncio.sleep(60)
 
 
-# запуск веб-панели (если включена в конфиге)
+# ─────────────────────────────
+# WEB PANEL
+# ─────────────────────────────
 async def start_web_panel():
     if not WEB_PANEL_ENABLED:
         return
@@ -62,51 +76,43 @@ async def start_web_panel():
         logger.info(f"Web panel started on port {WEB_PANEL_PORT}")
 
     except ImportError:
-        logger.warning("uvicorn/fastapi not installed — web panel disabled")
+        logger.warning("Web panel disabled (uvicorn/fastapi missing)")
 
 
-# точка входа приложения
+# ─────────────────────────────
+# MAIN
+# ─────────────────────────────
 async def main():
 
-    # защита от запуска без токена
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         logger.error("BOT_TOKEN не задан!")
         sys.exit(1)
 
-    # выбор базы данных (sqlite / postgres)
-    if DB_TYPE == "postgres":
-        import database_pg as db_module
-        database = db_module
-        logger.info("Using PostgreSQL database")
-    else:
-        logger.info("Using SQLite database")
-
-    # инициализация БД
-    await database.init_db()
+    # init DB
+    await db_impl.init_db()
     await sdb.init_schedule_db()
 
     logger.info(f"Bot started (mode={BOT_MODE}, db={DB_TYPE})")
 
-    # создание бота и диспетчера aiogram
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # передаём bot внутрь диспетчера (иногда нужно для middleware/хендлеров)
     dp["bot"] = bot
 
-    # подключаем роутеры
+    # routers
     dp.include_router(router)
     dp.include_router(sched_router)
 
-    # запускаем фоновые задачи
-    asyncio.create_task(reminder_loop(bot))
-    asyncio.create_task(schedule_loop(bot))
+    # background tasks (ОДИН цикл вместо 2–3)
+    asyncio.create_task(background_loop(bot))
     asyncio.create_task(source_monitor_loop(bot))
 
-    # веб-панель (если включена)
+    # web panel
     await start_web_panel()
 
-    # режим работы: webhook или polling
+    # ─────────────────────────────
+    # WEBHOOK MODE
+    # ─────────────────────────────
     if BOT_MODE == "webhook" and WEBHOOK_HOST:
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
         from aiohttp import web
@@ -135,21 +141,28 @@ async def main():
 
         await asyncio.Event().wait()
 
+    # ─────────────────────────────
+    # POLLING MODE
+    # ─────────────────────────────
     else:
-        # polling режим (самый простой)
         await bot.delete_webhook(drop_pending_updates=True)
 
-        await dp.start_polling(
-            bot,
-            allowed_updates=[
-                "message",
-                "callback_query",
-                "my_chat_member",
-                "chat_member"
-            ]
-        )
+        try:
+            await dp.start_polling(
+                bot,
+                allowed_updates=[
+                    "message",
+                    "callback_query",
+                    "my_chat_member",
+                    "chat_member"
+                ]
+            )
+        finally:
+            await bot.session.close()
 
 
-# запуск приложения
+# ─────────────────────────────
+# ENTRYPOINT
+# ─────────────────────────────
 if __name__ == "__main__":
     asyncio.run(main())
