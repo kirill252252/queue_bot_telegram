@@ -291,7 +291,7 @@ async def _apply_changes(message: Message, group: dict, changes: list[dict]):
 
 # ─── Skip queue management ────────────────────────────────────────────────────
 
-@schedule_router.callback_query(F.data.startswith("schedule_skip:"))
+@sched_router.callback_query(F.data.startswith("schedule_skip:"))
 async def cb_schedule_skip(call: CallbackQuery):
     chat_id = int(call.data.split(":")[1])
     groups = await sdb.get_chat_groups(chat_id)
@@ -322,7 +322,7 @@ async def cb_schedule_skip(call: CallbackQuery):
     await call.answer()
 
 
-@schedule_router.callback_query(F.data.startswith("toggle_skip:"))
+@sched_router.callback_query(F.data.startswith("toggle_skip:"))
 async def cb_toggle_skip(call: CallbackQuery):
     parts = call.data.split(":")
     lesson_id, chat_id = int(parts[1]), int(parts[2])
@@ -355,7 +355,7 @@ class SourceState(StatesGroup):
     waiting_source = State()
 
 
-@schedule_router.callback_query(F.data.startswith("schedule_sources:"))
+@sched_router.callback_query(F.data.startswith("schedule_sources:"))
 async def cb_schedule_sources(call: CallbackQuery):
     chat_id = int(call.data.split(":")[1])
     sources = await sdb.get_sources(chat_id)
@@ -420,7 +420,7 @@ async def cb_add_source(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@schedule_router.message(SourceState.waiting_source)
+@sched_router.message(SourceState.waiting_source)
 async def fsm_add_source(message: Message, state: FSMContext):
     data = await state.get_data()
     source_type = data["source_type"]
@@ -439,7 +439,7 @@ async def fsm_add_source(message: Message, state: FSMContext):
     )
 
 
-@schedule_router.callback_query(F.data.startswith("del_source:"))
+@sched_router.callback_query(F.data.startswith("del_source:"))
 async def cb_del_source(call: CallbackQuery):
     parts = call.data.split(":")
     source_db_id, chat_id = int(parts[1]), int(parts[2])
@@ -449,7 +449,7 @@ async def cb_del_source(call: CallbackQuery):
     await cb_schedule_sources(call)
 
 
-@schedule_router.callback_query(F.data.startswith("schedule_back:"))
+@sched_router.callback_query(F.data.startswith("schedule_back:"))
 async def cb_schedule_back(call: CallbackQuery):
     chat_id = int(call.data.split(":")[1])
     groups = await sdb.get_chat_groups(chat_id)
