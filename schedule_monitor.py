@@ -17,6 +17,47 @@ import schedule_db as sdb
 logger = logging.getLogger(__name__)
 
 
+def apply_overrides(lessons: list[dict], overrides: list[dict]) -> list[dict]:
+    """
+    Применяет изменения расписания (cancel / reschedule / add / room_change / teacher_change)
+    """
+    result = [dict(l) for l in lessons]
+
+    for o in overrides:
+        otype = o.get("type")
+
+        # ─── CANCEL ─────────────────────
+        if otype == "cancel":
+            subject = (o.get("subject") or "").lower()
+            result = [
+                l for l in result
+                if l["subject"].lower() != subject
+            ]
+
+        # ─── RESCHEDULE ────────────────
+        elif otype == "reschedule":
+            subject = (o.get("subject") or "").lower()
+
+            for l in result:
+                if l["subject"].lower() == subject:
+                    if o.get("time_start"):
+                        l["time_start"] = o["time_start"]
+                    if o.get("time_end"):
+                        l["time_end"] = o["time_end"]
+
+        # ─── ADD ───────────────────────
+        elif otype == "add":
+            result.append({
+                "subject": o.get("subject", "Доп. занятие"),
+                "time_start": o.get("time_start", "08:00"),
+                "time_end": o.get("time_end", "09:30"),
+                "room": o.get("room"),
+                "teacher": o.get("teacher"),
+            })
+
+    return sorted(result, key=lambda x: x["time_start"])
+
+
 async def schedule_tick(bot: Bot):
     """Вызывается каждую минуту."""
     now = datetime.now()
@@ -24,88 +65,91 @@ async def schedule_tick(bot: Bot):
     date_str = now.strftime("%d.%m.%Y")
     weekday = now.isoweekday()
 
-    lessons = await sdb.get_all_lessons_today()
+    groups = await sdb.get_all_groups()
+    if not groups:
+        return
 
-    for lesson in lessons:
-        # пропускаем отменённые пары
-        if lesson.get("override_type") == "cancel":
-            logger.info(f"Skipping cancelled lesson: {lesson['subject']}")
+    for group in groups:
+        group_id = group["id"]
+        chat_id = group["chat_id"]
+
+        lessons = await sdb.get_lessons_for_day(group_id, weekday)
+        if not lessons:
             continue
 
-        lesson_id = lesson["id"]
-        chat_id = lesson["chat_id"]
-        group_name = lesson["group_name"]
-        subject = lesson["subject"]
-        time_start = lesson["time_start"]
-        time_end = lesson["time_end"]
-        room = lesson.get("room") or ""
+        overrides = await sdb.get_overrides_for_date(group_id, date_str) \
+            if hasattr(sdb, "get_overrides_for_date") else []
 
-        # Открываем очередь в начале пары
-        # пропускаем пары для которых отключено создание очереди
-        if lesson.get("skip_queue"):
-            continue
+        effective = apply_overrides(lessons, overrides)
 
-        if current_time == time_start:
-            existing = await sdb.get_open_schedule_queue(lesson_id, date_str)
-            if not existing:
-                queue_name = f"{subject} ({group_name})"
-                queue_id = await db.create_queue(
-                    chat_id=chat_id,
-                    name=queue_name,
-                    description=f"📅 {date_str} | ⏰ {time_start}–{time_end}" + (f" | 🏫 {room}" if room else ""),
-                    max_slots=0,
-                    created_by=0,
-                    remind_timeout_min=5,
-                    notify_leave_public=False,
-                    auto_kick=False
-                )
-                await sdb.mark_queue_opened(lesson_id, queue_id, date_str)
-                logger.info(f"Opened queue for lesson: {queue_name}")
+        for lesson in effective:
+            subject = lesson["subject"]
+            time_start = lesson["time_start"]
+            time_end = lesson["time_end"]
+            room = lesson.get("room") or ""
+            teacher = lesson.get("teacher") or ""
 
-                try:
-                    await bot.send_message(
-                        chat_id,
-                        f"📚 <b>Начинается пара!</b>\n\n"
-                        f"👥 Группа: <b>{group_name}</b>\n"
-                        f"📖 Предмет: <b>{subject}</b>\n"
-                        f"⏰ Время: {time_start}–{time_end}"
-                        + (f"\n🏫 Аудитория: {room}" if room else "") +
-                        f"\n\nОчередь открыта — используй /queue для записи.",
-                        parse_mode="HTML"
+            # ─── OPEN QUEUE ─────────────────────────
+            if current_time == time_start:
+                existing = await sdb.get_open_schedule_queue(group_id, date_str)
+
+                if not existing:
+                    queue_id = await db.create_queue(
+                        chat_id=chat_id,
+                        name=f"{subject} ({group['group_name']})",
+                        description=f"⏰ {time_start}–{time_end}" +
+                                    (f" | 🏫 {room}" if room else ""),
+                        max_slots=0,
+                        created_by=0,
+                        remind_timeout_min=5,
+                        notify_leave_public=False,
+                        auto_kick=False
                     )
-                except Exception as e:
-                    logger.warning(f"Cannot notify chat {chat_id}: {e}")
 
-        # Закрываем очередь в конце пары
-        if current_time == time_end:
-            existing = await sdb.get_open_schedule_queue(lesson_id, date_str)
-            if existing:
-                queue_id = existing["queue_id"]
-                await db.close_queue(queue_id)
-                await sdb.mark_queue_closed(lesson_id, date_str)
-                logger.info(f"Closed queue for lesson: {subject}")
+                    await sdb.mark_queue_opened(group_id, queue_id, date_str)
 
-                try:
-                    await bot.send_message(
-                        chat_id,
-                        f"🔔 <b>Пара завершена!</b>\n\n"
-                        f"📖 <b>{subject}</b> ({group_name})\n"
-                        f"Очередь закрыта.",
-                        parse_mode="HTML"
-                    )
-                except Exception as e:
-                    logger.warning(f"Cannot notify chat {chat_id}: {e}")
+                    try:
+                        await bot.send_message(
+                            chat_id,
+                            f"📚 <b>Начинается пара!</b>\n\n"
+                            f"👥 Группа: <b>{group['group_name']}</b>\n"
+                            f"📖 {subject}\n"
+                            f"⏰ {time_start}–{time_end}"
+                            + (f"\n🏫 {room}" if room else ""),
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Notify error {chat_id}: {e}")
+
+            # ─── CLOSE QUEUE ────────────────────────
+            if current_time == time_end:
+                existing = await sdb.get_open_schedule_queue(group_id, date_str)
+
+                if existing:
+                    queue_id = existing["queue_id"]
+
+                    await db.close_queue(queue_id)
+                    await sdb.mark_queue_closed(group_id, date_str)
+
+                    try:
+                        await bot.send_message(
+                            chat_id,
+                            f"🔔 <b>Пара завершена</b>\n\n"
+                            f"📖 {subject} ({group['group_name']})\n"
+                            f"Очередь закрыта.",
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Notify error {chat_id}: {e}")
 
 
 async def schedule_loop(bot: Bot):
-    """Бесконечный цикл — каждую минуту проверяем расписание."""
+    """Бесконечный цикл планировщика."""
     while True:
         try:
             await schedule_tick(bot)
         except Exception as e:
             logger.error(f"Schedule tick error: {e}")
 
-        # ждём до следующей минуты
         now = datetime.now()
-        seconds_to_next = 60 - now.second
-        await asyncio.sleep(seconds_to_next)
+        await asyncio.sleep(60 - now.second)
