@@ -9,6 +9,13 @@ from config import (BOT_TOKEN, BOT_MODE, WEBHOOK_HOST, WEBHOOK_PATH, WEBHOOK_POR
                     WEB_PANEL_ENABLED, WEB_PANEL_PORT, DB_TYPE)
 from handlers import router
 from notifications import process_due_reminders
+from schedule_handlers import sched_router
+from schedule_manager import process_schedule_tick
+import schedule_db as sdb
+from schedule_handlers import schedule_router
+from schedule_monitor import schedule_loop
+from source_monitor import source_monitor_loop
+import schedule_db as sdb
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,6 +29,7 @@ async def reminder_loop(bot: Bot):
     while True:
         try:
             await process_due_reminders(bot)
+            await process_schedule_tick(bot)
         except Exception as e:
             logger.error(f"Reminder loop error: {e}")
         await asyncio.sleep(60)
@@ -60,13 +68,19 @@ async def main():
         logger.info("Using SQLite database")
 
     await database.init_db()
+    await sdb.init_schedule_db()
+    await sdb.init_schedule_db()
     logger.info(f"Bot started (mode={BOT_MODE}, db={DB_TYPE})")
 
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+    dp.include_router(sched_router)
+    dp.include_router(schedule_router)
 
     asyncio.create_task(reminder_loop(bot))
+    asyncio.create_task(schedule_loop(bot))
+    asyncio.create_task(source_monitor_loop(bot))
     await start_web_panel()
 
     if BOT_MODE == "webhook" and WEBHOOK_HOST:
