@@ -184,6 +184,47 @@ async def _init_pg():
             )
         """)
 
+        # ── Миграции: добавляем колонки которых может не быть в старой БД ──
+        # CREATE TABLE IF NOT EXISTS не трогает уже существующие таблицы,
+        # поэтому добавляем недостающие колонки через ALTER TABLE.
+        migrations = [
+            # schedule_lessons
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS lesson_num  INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS weekday     INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS time_start  TEXT NOT NULL DEFAULT '00:00'",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS time_end    TEXT NOT NULL DEFAULT '00:00'",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS room        TEXT",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS teacher     TEXT",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS is_active   INTEGER DEFAULT 1",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS skip_queue  INTEGER DEFAULT 0",
+            # schedule_overrides
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS lesson_num    INTEGER",
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS action        TEXT",
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS override_date TEXT",
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS subject       TEXT",
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS time_start    TEXT",
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS time_end      TEXT",
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS room          TEXT",
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS teacher       TEXT",
+            "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS comment       TEXT",
+            # schedule_events
+            "ALTER TABLE schedule_events ADD COLUMN IF NOT EXISTS lesson_num  INTEGER",
+            "ALTER TABLE schedule_events ADD COLUMN IF NOT EXISTS subject     TEXT",
+            "ALTER TABLE schedule_events ADD COLUMN IF NOT EXISTS time_start  TEXT",
+            "ALTER TABLE schedule_events ADD COLUMN IF NOT EXISTS time_end    TEXT",
+            "ALTER TABLE schedule_events ADD COLUMN IF NOT EXISTS queue_id    INTEGER",
+            "ALTER TABLE schedule_events ADD COLUMN IF NOT EXISTS status      TEXT DEFAULT 'pending'",
+            # schedule_sources
+            "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS last_post_id TEXT",
+            "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS source_type  TEXT",
+            "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS source_id    TEXT",
+        ]
+        for sql in migrations:
+            try:
+                await conn.execute(sql)
+            except Exception as e:
+                logger.debug(f"Migration skipped ({e}): {sql[:60]}")
+
 
 # ─────────────────────────────────────────────
 # HELPERS
