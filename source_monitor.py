@@ -197,7 +197,16 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
     except Exception as e:
         logger.error(f"VK monitor error: {e}")
         return None
+    
+    
+async def close_session():
+    global _http_session
 
+    if _http_session and not _http_session.closed:
+        await _http_session.close()
+        _http_session = None
+
+        logger.info("Source monitor session closed")
 
 # ─────────────────────────────────────────────
 # LOOP
@@ -225,3 +234,5 @@ async def source_monitor_loop(bot: Bot, interval_minutes: int = 15):
             logger.error(f"monitor loop error: {e}")
 
         await asyncio.sleep(interval_minutes * 60)
+
+        
