@@ -83,7 +83,7 @@ async def notify_approaching(bot: Bot, queue: dict, member: dict, position: int)
         except Exception as e:
             logger.warning(f"Cannot notify approaching in group: {e}")
 
-async def notify_kicked(bot: Bot, queue: dict, user_id: int, by_timeout: bool = False):
+async def notify_kicked(bot: Bot, queue: dict, user_id: int, by_timeout: bool = False, position: int = None):
     reason = "за неактивность ⏱" if by_timeout else "администратором"
     await safe_dm(
         bot, user_id,
