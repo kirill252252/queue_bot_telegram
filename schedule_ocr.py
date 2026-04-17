@@ -1,7 +1,7 @@
 """
-Распознавание расписания с изображений через Google Gemini API.
-Поддерживает фото и скриншоты расписания.
-Единый модуль для всех OCR-задач (используется schedule_handlers.py и source_monitor.py).
+Распознавание расписания с изображений через Groq API (LLaMA Vision).
+Поддерживает фото и скриншоты расписания, а также текстовый парсинг изменений.
+Единый модуль для всех AI-задач (используется schedule_handlers.py и source_monitor.py).
 """
 
 import base64
@@ -16,20 +16,22 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# Google Gemini config
+# Groq API config
 # ─────────────────────────────────────────────
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-if not GOOGLE_API_KEY:
-    logger.warning("GOOGLE_API_KEY is not set — OCR disabled")
+if not GROQ_API_KEY:
+    logger.warning("GROQ_API_KEY is not set — AI features disabled")
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-GEMINI_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent?key={GOOGLE_API_KEY}"
-)
+# Модель с поддержкой изображений (vision)
+VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+# Модель для текстовых задач (быстрее и дешевле)
+TEXT_MODEL = os.getenv("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile")
+
 
 # ─────────────────────────────────────────────
 # PROMPTS
@@ -89,7 +91,7 @@ weekday: 1=Пн ... 7=Вс.
 
 
 # ─────────────────────────────────────────────
-# CORE — Gemini REST call
+# HELPERS
 # ─────────────────────────────────────────────
 
 def _image_to_base64(image_bytes: bytes) -> str:
@@ -98,16 +100,13 @@ def _image_to_base64(image_bytes: bytes) -> str:
 
 def _extract_json(text: str) -> Optional[dict]:
     """Извлекаем JSON из ответа модели, убирая markdown-обёртку."""
-    # Убираем ```json ... ``` или просто ``` ... ```
     cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`").strip()
 
-    # Пробуем распарсить целиком
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
 
-    # Ищем первый JSON-объект
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if match:
         try:
@@ -118,53 +117,129 @@ def _extract_json(text: str) -> Optional[dict]:
     return None
 
 
-async def _call_gemini(parts: list[dict], max_tokens: int = 2048) -> Optional[dict]:
+def _groq_headers() -> dict:
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+    }
+
+
+# ─────────────────────────────────────────────
+# CORE — Groq REST call (vision)
+# ─────────────────────────────────────────────
+
+async def _call_groq_vision(
+    prompt: str,
+    image_bytes: bytes,
+    media_type: str = "image/jpeg",
+    max_tokens: int = 4096,
+) -> Optional[dict]:
     """
-    parts — список объектов для Gemini API:
-      {"text": "..."}
-      {"inline_data": {"mime_type": "image/jpeg", "data": "base64..."}}
+    Отправляем изображение + промпт в Groq Vision API.
     """
-    if not GOOGLE_API_KEY:
-        logger.error("GOOGLE_API_KEY is not set — cannot call Gemini")
+    if not GROQ_API_KEY:
+        logger.error("GROQ_API_KEY is not set — cannot call Groq Vision")
         return None
 
+    b64 = _image_to_base64(image_bytes)
+    data_url = f"data:{media_type};base64,{b64}"
+
     body = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": max_tokens,
-        },
+        "model": VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.1,
     }
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                GEMINI_URL,
+                GROQ_URL,
                 json=body,
-                headers={"Content-Type": "application/json"},
+                headers=_groq_headers(),
             ) as resp:
-
                 if resp.status != 200:
                     error_text = await resp.text()
-                    logger.error(f"Gemini API error {resp.status}: {error_text}")
+                    logger.error(f"Groq Vision API error {resp.status}: {error_text}")
                     return None
 
                 data = await resp.json()
 
-                # Извлекаем текст ответа
                 try:
-                    content = data["candidates"][0]["content"]["parts"][0]["text"]
+                    content = data["choices"][0]["message"]["content"]
                 except (KeyError, IndexError) as e:
-                    logger.error(f"Unexpected Gemini response structure: {e}\n{data}")
+                    logger.error(f"Unexpected Groq response structure: {e}\n{data}")
                     return None
 
                 return _extract_json(content)
 
     except aiohttp.ClientError as e:
-        logger.error(f"Gemini network error: {e}")
+        logger.error(f"Groq Vision network error: {e}")
         return None
     except Exception as e:
-        logger.error(f"Gemini call exception: {e}")
+        logger.error(f"Groq Vision call exception: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────
+# CORE — Groq REST call (text only)
+# ─────────────────────────────────────────────
+
+async def _call_groq_text(
+    prompt: str,
+    max_tokens: int = 1024,
+) -> Optional[dict]:
+    """
+    Отправляем текстовый запрос в Groq (без изображения).
+    """
+    if not GROQ_API_KEY:
+        logger.error("GROQ_API_KEY is not set — cannot call Groq")
+        return None
+
+    body = {
+        "model": TEXT_MODEL,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.1,
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                GROQ_URL,
+                json=body,
+                headers=_groq_headers(),
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"Groq Text API error {resp.status}: {error_text}")
+                    return None
+
+                data = await resp.json()
+
+                try:
+                    content = data["choices"][0]["message"]["content"]
+                except (KeyError, IndexError) as e:
+                    logger.error(f"Unexpected Groq response structure: {e}\n{data}")
+                    return None
+
+                return _extract_json(content)
+
+    except aiohttp.ClientError as e:
+        logger.error(f"Groq Text network error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Groq Text call exception: {e}")
         return None
 
 
@@ -179,23 +254,20 @@ async def parse_schedule_image(
     Распознаём базовое расписание с фотографии.
     Возвращает: {"group_name": ..., "lessons": [...]}
     """
-    b64 = _image_to_base64(image_bytes)
-
-    parts = [
-        {"text": SCHEDULE_PROMPT},
-        {"inline_data": {"mime_type": media_type, "data": b64}},
-    ]
-
-    result = await _call_gemini(parts, max_tokens=4096)
+    result = await _call_groq_vision(
+        prompt=SCHEDULE_PROMPT,
+        image_bytes=image_bytes,
+        media_type=media_type,
+        max_tokens=4096,
+    )
 
     if not result or not isinstance(result, dict):
         return None
 
     if "error" in result:
-        logger.warning(f"Gemini schedule parse error: {result['error']}")
+        logger.warning(f"Groq schedule parse error: {result['error']}")
         return None
 
-    # Фильтруем невалидные занятия
     required_keys = ("weekday", "lesson_num", "subject", "time_start", "time_end")
     lessons = [
         l for l in result.get("lessons", [])
@@ -216,14 +288,12 @@ async def parse_change_image(
     Распознаём изменения расписания с фотографии.
     Возвращает: {"changes": [...]}
     """
-    b64 = _image_to_base64(image_bytes)
-
-    parts = [
-        {"text": CHANGE_PROMPT},
-        {"inline_data": {"mime_type": media_type, "data": b64}},
-    ]
-
-    return await _call_gemini(parts, max_tokens=2048)
+    return await _call_groq_vision(
+        prompt=CHANGE_PROMPT,
+        image_bytes=image_bytes,
+        media_type=media_type,
+        max_tokens=2048,
+    )
 
 
 # ─────────────────────────────────────────────
@@ -239,8 +309,8 @@ async def parse_change_text(text: str) -> Optional[dict]:
     if not any(k in text.lower() for k in keywords):
         return None
 
-    parts = [{"text": f"{CHANGE_PROMPT}\n\nТекст сообщения:\n{text}"}]
-    return await _call_gemini(parts, max_tokens=1024)
+    prompt = f"{CHANGE_PROMPT}\n\nТекст сообщения:\n{text}"
+    return await _call_groq_text(prompt, max_tokens=1024)
 
 
 # ─────────────────────────────────────────────
@@ -257,20 +327,22 @@ async def parse_schedule_change(
     Используется source_monitor.py для разбора постов из VK и Telegram.
     Возвращает: {"changes": [...]}
     """
-    parts = [{"text": CHANGE_PROMPT}]
-
     if image_bytes:
-        b64 = _image_to_base64(image_bytes)
-        parts.append({"inline_data": {"mime_type": media_type, "data": b64}})
-
-    if text:
-        parts.append({"text": f"\nТекст сообщения:\n{text}"})
-
-    if len(parts) == 1:
-        # Только промпт, нет данных
+        # Если есть картинка — используем vision модель
+        prompt = CHANGE_PROMPT
+        if text:
+            prompt += f"\n\nТекст поста:\n{text}"
+        return await _call_groq_vision(
+            prompt=prompt,
+            image_bytes=image_bytes,
+            media_type=media_type,
+            max_tokens=2048,
+        )
+    elif text:
+        # Только текст — используем текстовую модель (быстрее)
+        return await parse_change_text(text)
+    else:
         return None
-
-    return await _call_gemini(parts, max_tokens=2048)
 
 
 # ─────────────────────────────────────────────
