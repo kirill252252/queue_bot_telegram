@@ -17,7 +17,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-import database as db
+import db
 import schedule_db as sdb
 from schedule_ocr import parse_schedule_image, parse_change_image, format_schedule
 from schedule_manager import get_today_schedule, get_week_schedule

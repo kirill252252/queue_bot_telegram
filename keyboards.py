@@ -55,11 +55,12 @@ def pm_queue_actions_keyboard(queue_id: int, user_in: bool,
                               is_closed: bool, chat_id: int,
                               user_is_first: bool = False,
                               is_full: bool = False,
-                              is_subscribed: bool = False) -> InlineKeyboardMarkup:
+                              is_subscribed: bool = False,
+                              is_frozen: bool = False) -> InlineKeyboardMarkup:
     buttons = []
     if not is_closed:
         if user_in:
-            if user_is_first:
+            if user_is_first and not is_frozen:
                 buttons.append([InlineKeyboardButton(
                     text="✅ Я прошёл, следующий!",
                     callback_data=f"done_next:{queue_id}"
@@ -68,10 +69,16 @@ def pm_queue_actions_keyboard(queue_id: int, user_in: bool,
                 text="🚪 Выйти из очереди",
                 callback_data=f"pm_leave:{queue_id}"
             )])
-            buttons.append([
-                InlineKeyboardButton(text="🧊 Заморозить место", callback_data=f"freeze_menu:{queue_id}"),
-                InlineKeyboardButton(text="🔀 Обменяться", callback_data=f"swap_menu:{queue_id}"),
-            ])
+            if is_frozen:
+                buttons.append([InlineKeyboardButton(
+                    text="🔥 Разморозить место",
+                    callback_data=f"unfreeze:{queue_id}"
+                )])
+            else:
+                buttons.append([
+                    InlineKeyboardButton(text="🧊 Заморозить место", callback_data=f"freeze_menu:{queue_id}"),
+                    InlineKeyboardButton(text="🔀 Обменяться", callback_data=f"swap_menu:{queue_id}"),
+                ])
         else:
             if is_full:
                 if is_subscribed:

@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 import logging
 import sys
 
@@ -10,14 +11,14 @@ from config import (
     WEB_PANEL_ENABLED, WEB_PANEL_PORT, DB_TYPE
 )
 
-from handlers import router
-from schedule_handlers import sched_router
-
-from notifications import process_due_reminders
-from schedule_manager import process_schedule_tick
-from source_monitor import source_monitor_loop
-
+import db
 import schedule_db as sdb
+from handlers import router
+from notifications import process_due_reminders
+from schedule_handlers import sched_router
+from schedule_manager import process_schedule_tick
+from source_monitor import close_session as close_source_monitor_session
+from source_monitor import source_monitor_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,14 +31,6 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────
 # БАЗА ДАННЫХ (FIXED)
 # ─────────────────────────────
-if DB_TYPE == "postgres":
-    import database_pg as db_impl
-    logger.info("Using PostgreSQL database")
-else:
-    import database as db_impl
-    logger.info("Using SQLite database")
-
-
 # ─────────────────────────────
 # BACKGROUND LOOP (ЕДИНЫЙ)
 # ─────────────────────────────
@@ -88,8 +81,9 @@ async def main():
         logger.error("BOT_TOKEN не задан!")
         sys.exit(1)
 
-    # init DB
-    await db_impl.init_db()
+    logger.info("Using %s database", "PostgreSQL" if DB_TYPE == "postgres" else "SQLite")
+
+    await db.init_db()
     await sdb.init_schedule_db()
 
     logger.info(f"Bot started (mode={BOT_MODE}, db={DB_TYPE})")
@@ -104,50 +98,50 @@ async def main():
     dp.include_router(sched_router)
 
     # background tasks (ОДИН цикл вместо 2–3)
-    asyncio.create_task(background_loop(bot))
-    asyncio.create_task(source_monitor_loop(bot))
-
-    # web panel
-    await start_web_panel()
+    tasks = [
+        asyncio.create_task(background_loop(bot), name="background_loop"),
+        asyncio.create_task(source_monitor_loop(bot), name="source_monitor_loop"),
+    ]
 
     # ─────────────────────────────
     # WEBHOOK MODE
     # ─────────────────────────────
-    if BOT_MODE == "webhook" and WEBHOOK_HOST:
-        from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-        from aiohttp import web
+    try:
+        await start_web_panel()
 
-        webhook_url = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-        await bot.set_webhook(webhook_url)
+        if BOT_MODE == "webhook" and WEBHOOK_HOST:
+            from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+            from aiohttp import web
 
-        logger.info(f"Webhook: {webhook_url}")
+            webhook_url = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+            await bot.set_webhook(webhook_url)
 
-        app = web.Application()
+            logger.info(f"Webhook: {webhook_url}")
 
-        SimpleRequestHandler(
-            dispatcher=dp,
-            bot=bot
-        ).register(app, path=WEBHOOK_PATH)
+            app = web.Application()
 
-        setup_application(app, dp, bot=bot)
+            SimpleRequestHandler(
+                dispatcher=dp,
+                bot=bot
+            ).register(app, path=WEBHOOK_PATH)
 
-        runner = web.AppRunner(app)
-        await runner.setup()
+            setup_application(app, dp, bot=bot)
 
-        site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
-        await site.start()
+            runner = web.AppRunner(app)
+            await runner.setup()
 
-        logger.info(f"Webhook server on :{WEBHOOK_PORT}")
+            site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
+            await site.start()
 
-        await asyncio.Event().wait()
+            logger.info(f"Webhook server on :{WEBHOOK_PORT}")
+
+            await asyncio.Event().wait()
 
     # ─────────────────────────────
     # POLLING MODE
     # ─────────────────────────────
-    else:
-        await bot.delete_webhook(drop_pending_updates=True)
-
-        try:
+        else:
+            await bot.delete_webhook(drop_pending_updates=True)
             await dp.start_polling(
                 bot,
                 allowed_updates=[
@@ -157,8 +151,14 @@ async def main():
                     "chat_member"
                 ]
             )
-        finally:
-            await bot.session.close()
+    finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        await close_source_monitor_session()
+        await bot.session.close()
 
 
 # ─────────────────────────────

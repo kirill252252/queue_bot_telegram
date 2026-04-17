@@ -3,15 +3,14 @@ Web admin panel — FastAPI + Jinja2.
 Run alongside the bot. Access at http://yourserver:8080
 Password set via WEB_PANEL_PASSWORD in .env
 """
-import asyncio
 import secrets
 from datetime import datetime
 
-from fastapi import FastAPI, Request, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-import database as db
+import db
 from config import WEB_PANEL_PASSWORD
 
 app = FastAPI(title="Queue Bot Admin", docs_url=None, redoc_url=None)
@@ -174,16 +173,7 @@ async def chat_detail(chat_id: int, user: str = Depends(check_auth)):
 
     queues = await db.get_chat_queues(chat_id)
 
-    import aiosqlite
-    async with aiosqlite.connect(db.DB_PATH) as conn:
-        conn.row_factory = aiosqlite.Row
-        cur = await conn.execute("""
-            SELECT * FROM queues
-            WHERE chat_id=? AND is_active=0
-            ORDER BY created_at DESC
-            LIMIT 10
-        """, (chat_id,))
-        closed = [dict(r) for r in await cur.fetchall()]
+    closed = await db.get_recent_closed_queues(chat_id)
 
     all_queues = queues + closed
 

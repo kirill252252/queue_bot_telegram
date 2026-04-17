@@ -97,6 +97,21 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_chats (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
         for col, defn in [
             ("remind_timeout_min", "INTEGER DEFAULT 5"),
             ("notify_leave_public", "INTEGER DEFAULT 1"),
@@ -280,6 +295,9 @@ async def close_queue(queue_id: int):
 async def delete_queue(queue_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM queue_members WHERE queue_id = ?", (queue_id,))
+        await db.execute("DELETE FROM queue_subscriptions WHERE queue_id = ?", (queue_id,))
+        await db.execute("DELETE FROM queue_invites WHERE queue_id = ?", (queue_id,))
+        await db.execute("DELETE FROM swap_requests WHERE queue_id = ?", (queue_id,))
         await db.execute("DELETE FROM queues WHERE id = ?", (queue_id,))
         await db.execute("DELETE FROM reminder_tasks WHERE queue_id = ?", (queue_id,))
         await db.commit()
@@ -480,6 +498,18 @@ async def get_global_stats() -> dict:
             "total_users": total_users,
             "total_chats": total_chats,
         }
+
+
+async def get_recent_closed_queues(chat_id: int, limit: int = 10) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("""
+            SELECT * FROM queues
+            WHERE chat_id = ? AND is_active = 0
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (chat_id, limit))
+        return [dict(r) for r in await cur.fetchall()]
 
 
 # генерируем уникальный токен для ссылки-приглашения
