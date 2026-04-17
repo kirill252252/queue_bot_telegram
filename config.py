@@ -28,17 +28,28 @@ WEB_PANEL_ENABLED  = os.getenv("WEB_PANEL_ENABLED", "false").lower() == "true"
 WEB_PANEL_PORT     = int(os.getenv("WEB_PANEL_PORT", "8080"))
 WEB_PANEL_PASSWORD = os.getenv("WEB_PANEL_PASSWORD", "changeme")
 
-# ── Google Gemini (OCR расписания) ────────────────────────────────────────────
-# Получить ключ: https://aistudio.google.com/app/apikey
-# Добавить в .env: GOOGLE_API_KEY=ваш_ключ
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+# ── Groq AI (OCR расписания и парсинг изменений) ──────────────────────────────
+# Получить ключ: https://console.groq.com/keys
+# Добавить в .env: GROQ_API_KEY=gsk_ваш_ключ
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-if not GOOGLE_API_KEY:
+# Модели можно переопределить в .env
+# Vision (изображения расписания):
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+# Text (парсинг текстовых сообщений об изменениях):
+GROQ_TEXT_MODEL   = os.getenv("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile")
+
+if not GROQ_API_KEY:
     import logging as _logging
     _logging.getLogger(__name__).warning(
-        "GOOGLE_API_KEY не задан — функции OCR расписания отключены. "
-        "Получите ключ на https://aistudio.google.com/app/apikey"
+        "GROQ_API_KEY не задан — AI-функции расписания отключены. "
+        "Получите ключ на https://console.groq.com/keys и добавьте в .env"
     )
+
+# ── VK мониторинг ─────────────────────────────────────────────────────────────
+# Токен VK API для мониторинга стены группы (опционально)
+# Получить: https://vk.com/dev/access_token (user token или service token)
+VK_TOKEN = os.getenv("VK_TOKEN", "")
 
 # ── Уведомления ───────────────────────────────────────────────────────────────
 # За сколько мест до первого предупреждать участника

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────
-# shared HTTP session (ВАЖНО: меньше токенов/нагрузки)
+# shared HTTP session (меньше токенов/нагрузки)
 # ─────────────────────────────────────────────
 
 _http_session: aiohttp.ClientSession | None = None
@@ -91,12 +91,14 @@ async def check_telegram_source(bot: Bot, source: dict, chat_id: int):
             applied = []
             for change in result["changes"]:
                 gname = (change.get("group") or "").lower()
-
                 targets = [group_map.get(gname)] if gname else groups
 
                 for g in [x for x in targets if x]:
                     await sdb.save_override(g["id"], change)
-                    applied.append(f"{change['type']} {change.get('subject','?')}")
+                    # FIX: использовать 'action', а не 'type' (поле называется action)
+                    action = change.get("action") or change.get("type") or "изменение"
+                    subject = change.get("subject") or "?"
+                    applied.append(f"{action}: {subject}")
 
             if applied:
                 await bot.send_message(
@@ -114,7 +116,7 @@ async def check_telegram_source(bot: Bot, source: dict, chat_id: int):
 
 
 # ─────────────────────────────────────────────
-# VK (фикс стабильности)
+# VK
 # ─────────────────────────────────────────────
 
 async def check_vk_source(bot: Bot, source: dict, chat_id: int):
@@ -166,47 +168,59 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
                 continue
 
             image_bytes = None
-            photos = item.get("attachments", [])
+            attachments = item.get("attachments", [])
 
-            if photos:
+            if attachments:
                 try:
-                    url = photos[0]["photo"]["sizes"][-1]["url"]
-                    async with session.get(url) as r:
-                        image_bytes = await r.read()
-                except Exception:
-                    pass
+                    # Ищем первую фотографию во вложениях
+                    for att in attachments:
+                        if att.get("type") == "photo":
+                            sizes = att["photo"].get("sizes", [])
+                            if sizes:
+                                url = sizes[-1]["url"]
+                                async with session.get(url) as r:
+                                    image_bytes = await r.read()
+                                break
+                except Exception as e:
+                    logger.warning(f"VK photo download error: {e}")
 
             result = await parse_schedule_change(text, image_bytes)
 
             if not result or not result.get("changes"):
                 continue
 
+            applied = []
             for change in result["changes"]:
                 for g in groups:
                     await sdb.save_override(g["id"], change)
+                action = change.get("action") or change.get("type") or "изменение"
+                subject = change.get("subject") or "?"
+                applied.append(f"{action}: {subject}")
 
-            await bot.send_message(
-                chat_id,
-                "📢 <b>Изменение расписания (VK)</b>\n"
-                f"Источник: {source_id}",
-                parse_mode="HTML"
-            )
+            if applied:
+                await bot.send_message(
+                    chat_id,
+                    "📢 <b>Изменение расписания (VK)</b>\n"
+                    f"Источник: {source_id}\n\n"
+                    + "\n".join(f"• {a}" for a in applied),
+                    parse_mode="HTML"
+                )
 
         return latest_id
 
     except Exception as e:
         logger.error(f"VK monitor error: {e}")
         return None
-    
-    
+
+
 async def close_session():
     global _http_session
 
     if _http_session and not _http_session.closed:
         await _http_session.close()
         _http_session = None
-
         logger.info("Source monitor session closed")
+
 
 # ─────────────────────────────────────────────
 # LOOP
@@ -225,14 +239,13 @@ async def source_monitor_loop(bot: Bot, interval_minutes: int = 15):
                 elif stype == "vk":
                     new_id = await check_vk_source(bot, source, source["chat_id"])
                 else:
+                    logger.warning(f"Unknown source type: {stype}")
                     continue
 
                 if new_id:
                     await sdb.update_source_checkpoint(source["id"], new_id)
 
         except Exception as e:
-            logger.error(f"monitor loop error: {e}")
+            logger.error(f"Monitor loop error: {e}")
 
         await asyncio.sleep(interval_minutes * 60)
-
-        
