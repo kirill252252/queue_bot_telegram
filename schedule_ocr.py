@@ -38,21 +38,34 @@ TEXT_MODEL = os.getenv("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile")
 # ─────────────────────────────────────────────
 
 SCHEDULE_PROMPT = """
-Ты — парсер расписания учебных занятий.
+Ты — парсер расписания учебных занятий аэрокосмического колледжа.
+
+На изображении таблица расписания. Особенности формата:
+- Дни недели написаны вертикально в левой колонке (ПОНЕДЕЛЬНИК, ВТОРНИК, СРЕДА, ЧЕТВЕРГ, ПЯТНИЦА, СУББОТА)
+- Колонка «Лента» — это номер пары (1, 2, 3, 4...). Используй его как lesson_num.
+- В одной таблице может быть НЕСКОЛЬКО групп — у каждой свои колонки (Лента / Ауд. / Предмет+Преподаватель)
+- Название группы написано в заголовке каждого блока колонок (например: Гр. ПК-10-25, Гр. ИТ-17-25)
+- Преподаватель написан под названием предмета в той же ячейке
+- Если ячейка пустая или содержит «Внеклассное мероприятие» / «—» — пропускай её
+- Времени начала/окончания в таблице нет — оставляй time_start и time_end пустыми строками ""
 
 Верни ТОЛЬКО JSON, без пояснений и markdown:
 
 {
-  "group_name": "string или null",
-  "lessons": [
+  "groups": [
     {
-      "weekday": 1,
-      "lesson_num": 1,
-      "subject": "string",
-      "teacher": "string или null",
-      "room": "string или null",
-      "time_start": "HH:MM",
-      "time_end": "HH:MM"
+      "group_name": "ПК-10-25",
+      "lessons": [
+        {
+          "weekday": 1,
+          "lesson_num": 1,
+          "subject": "Математика",
+          "teacher": "Дубиненко ЕП",
+          "room": "С-5",
+          "time_start": "",
+          "time_end": ""
+        }
+      ]
     }
   ]
 }
@@ -62,21 +75,32 @@ weekday: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс.
 """
 
 CHANGE_PROMPT = """
-Ты — парсер изменений расписания учебных занятий.
+Ты — парсер изменений расписания учебных занятий аэрокосмического колледжа.
 
-Проанализируй текст или изображение и верни ТОЛЬКО JSON, без пояснений и markdown:
+На изображении или в тексте — лист «Изменения в расписании».
+Особенности формата:
+- В заголовке указана дата и день недели (например: «На 20.04.2026. (ПОНЕДЕЛЬНИК) - Вторая неделя»)
+- Таблица содержит колонки: Группа | Лента | Дисциплина | Преподаватель | Аудитория
+- «Лента» — это номер пары, используй как lesson_num
+- «Лента нет» или пустая лента — занятие отменено (action: cancel)
+- «По расписанию» в дисциплине — занятие проходит по обычному расписанию (пропускай)
+- Строка «Уходит: Группа ХХХ (практика)» — это примечание, не изменение расписания (пропускай)
+- Одна строка = одно изменение для одной группы
+
+Верни ТОЛЬКО JSON, без пояснений и markdown:
 
 {
+  "date": "YYYY-MM-DD или null",
   "changes": [
     {
       "action": "cancel" | "reschedule" | "add" | "room_change" | "teacher_change",
-      "group": "название группы или null",
+      "group": "название группы, например ПК-10-25",
       "lesson_num": 1,
       "weekday": 1,
       "date": "YYYY-MM-DD или null",
       "subject": "предмет или null",
-      "time_start": "HH:MM или null",
-      "time_end": "HH:MM или null",
+      "time_start": null,
+      "time_end": null,
       "room": "аудитория или null",
       "teacher": "преподаватель или null",
       "comment": "комментарий или null"
@@ -84,9 +108,9 @@ CHANGE_PROMPT = """
   ]
 }
 
-action: cancel=отмена, reschedule=перенос, add=добавление, room_change=смена аудитории, teacher_change=замена преподавателя.
-weekday: 1=Пн ... 7=Вс.
-Если изменений не найдено — верни: {"changes": []}
+action: cancel=отмена (лента нет), reschedule=перенос времени/аудитории, add=новое занятие, room_change=смена аудитории, teacher_change=замена преподавателя.
+weekday: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс.
+Если изменений не найдено — верни: {"date": null, "changes": []}
 """
 
 
@@ -252,13 +276,14 @@ async def parse_schedule_image(
 ) -> Optional[dict]:
     """
     Распознаём базовое расписание с фотографии.
-    Возвращает: {"group_name": ..., "lessons": [...]}
+    Возвращает: {"groups": [{"group_name": ..., "lessons": [...]}, ...]}
+    Для обратной совместимости также поддерживает старый формат {"group_name": ..., "lessons": [...]}.
     """
     result = await _call_groq_vision(
         prompt=SCHEDULE_PROMPT,
         image_bytes=image_bytes,
         media_type=media_type,
-        max_tokens=4096,
+        max_tokens=8192,
     )
 
     if not result or not isinstance(result, dict):
@@ -268,13 +293,31 @@ async def parse_schedule_image(
         logger.warning(f"Groq schedule parse error: {result['error']}")
         return None
 
-    required_keys = ("weekday", "lesson_num", "subject", "time_start", "time_end")
+    required_keys = ("weekday", "lesson_num", "subject")
+
+    # Новый формат: несколько групп
+    if "groups" in result:
+        for group in result["groups"]:
+            group["lessons"] = [
+                l for l in group.get("lessons", [])
+                if all(k in l for k in required_keys)
+            ]
+        result["groups"] = [g for g in result["groups"] if g.get("lessons")]
+        return result
+
+    # Старый/упрощённый формат: одна группа
     lessons = [
         l for l in result.get("lessons", [])
         if all(k in l for k in required_keys)
     ]
     result["lessons"] = lessons
-    return result
+    # Оборачиваем в общий формат
+    return {
+        "groups": [{
+            "group_name": result.get("group_name") or "Группа",
+            "lessons": lessons,
+        }]
+    }
 
 
 # ─────────────────────────────────────────────
@@ -286,14 +329,18 @@ async def parse_change_image(
 ) -> Optional[dict]:
     """
     Распознаём изменения расписания с фотографии.
-    Возвращает: {"changes": [...]}
+    Возвращает: {"date": "YYYY-MM-DD", "changes": [...]}
     """
-    return await _call_groq_vision(
+    result = await _call_groq_vision(
         prompt=CHANGE_PROMPT,
         image_bytes=image_bytes,
         media_type=media_type,
-        max_tokens=2048,
+        max_tokens=4096,
     )
+    # Нормализуем: если нет поля date — добавляем null
+    if result and "changes" in result and "date" not in result:
+        result["date"] = None
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -362,8 +409,11 @@ def format_schedule(lessons: list[dict]) -> str:
         for l in sorted(by_day[wd], key=lambda x: x["lesson_num"]):
             teacher = f" — {l['teacher']}" if l.get("teacher") else ""
             room = f" [{l['room']}]" if l.get("room") else ""
+            ts = l.get("time_start") or ""
+            te = l.get("time_end") or ""
+            time_str = f" {ts}–{te}" if ts and te else ""
             lines.append(
-                f"{l['lesson_num']}. {l['time_start']}–{l['time_end']} "
+                f"{l['lesson_num']}.{time_str} "
                 f"<b>{l['subject']}</b>{teacher}{room}"
             )
 

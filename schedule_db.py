@@ -421,21 +421,21 @@ async def get_overrides_for_date(group_id: int, date_str: str) -> list[dict]:
     """, (group_id, date_str))
 
 
-async def save_override(group_id: int, override: dict):
+async def save_override(group_id: int, override: dict, fallback_date: str = None):
     """
     Сохранить изменение расписания из парсера.
     override может содержать: action/type, lesson_num, subject,
-    time_start, time_end, room, teacher, date, comment
+    time_start, time_end, room, teacher, date, comment.
+    fallback_date — дата из заголовка листа изменений (если в строке нет своей даты).
     """
     action = override.get("action") or override.get("type") or "cancel"
 
-    # Определяем дату: явная или сегодня
-    date_raw = override.get("date") or override.get("new_date")
+    # Определяем дату: из строки → из заголовка → сегодня
+    date_raw = override.get("date") or override.get("new_date") or fallback_date
     if date_raw:
-        # Пробуем нормализовать формат
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%Y."):
             try:
-                date_str = datetime.strptime(date_raw, fmt).strftime("%Y-%m-%d")
+                date_str = datetime.strptime(date_raw.rstrip("."), fmt).strftime("%Y-%m-%d")
                 break
             except ValueError:
                 continue
