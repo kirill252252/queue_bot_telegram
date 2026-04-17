@@ -5,7 +5,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-import database as db
+import db
 from config import NOTIFY_APPROACHING
 
 logger = logging.getLogger(__name__)

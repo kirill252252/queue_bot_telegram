@@ -4,7 +4,10 @@ Uses asyncpg directly (faster than SQLAlchemy for this use case).
 Switch by setting DB_TYPE=postgres in .env
 """
 import asyncpg
+import secrets
+from datetime import datetime, timedelta
 from typing import Optional
+
 from config import POSTGRES_DSN
 
 _pool: asyncpg.Pool = None
@@ -254,6 +257,9 @@ async def close_queue(queue_id: int):
 async def delete_queue(queue_id: int):
     pool = await get_pool()
     async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM reminder_tasks WHERE queue_id=$1", queue_id)
+        await conn.execute("DELETE FROM queue_invites WHERE queue_id=$1", queue_id)
+        await conn.execute("DELETE FROM swap_requests WHERE queue_id=$1", queue_id)
         await conn.execute("DELETE FROM queues WHERE id=$1", queue_id)
 
 
@@ -330,7 +336,6 @@ async def get_user_queue_memberships(user_id: int) -> list[dict]:
 
 
 async def create_reminder(queue_id: int, user_id: int, fire_at: str, kind: str = 'remind'):
-    from datetime import datetime
     fire_dt = datetime.strptime(fire_at, "%Y-%m-%d %H:%M:%S")
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -338,12 +343,11 @@ async def create_reminder(queue_id: int, user_id: int, fire_at: str, kind: str =
             "UPDATE reminder_tasks SET done=1 WHERE queue_id=$1 AND user_id=$2 AND done=0",
             queue_id, user_id)
         await conn.execute(
-            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at) VALUES ($1,$2,$3)",
-            queue_id, user_id, fire_dt)
+            "INSERT INTO reminder_tasks (queue_id, user_id, fire_at, kind) VALUES ($1,$2,$3,$4)",
+            queue_id, user_id, fire_dt, kind)
 
 
 async def get_due_reminders(now: str) -> list[dict]:
-    from datetime import datetime
     pool = await get_pool()
     now_dt = datetime.strptime(now, "%Y-%m-%d %H:%M:%S")
     async with pool.acquire() as conn:
@@ -409,15 +413,16 @@ async def get_stats(chat_id: int) -> dict:
             SELECT COUNT(*) FROM queue_members qm
             JOIN queues q ON q.id=qm.queue_id WHERE q.chat_id=$1
         """, chat_id)
+        unique_users = await conn.fetchval("""
+            SELECT COUNT(DISTINCT qm.user_id) FROM queue_members qm
+            JOIN queues q ON q.id=qm.queue_id WHERE q.chat_id=$1
+        """, chat_id)
         return {
             "total_queues": total_queues,
             "active_queues": active_queues,
             "total_members": total_members,
+            "unique_users": unique_users,
         }
-
-
-import secrets
-from datetime import datetime, timedelta
 
 
 async def create_invite(queue_id: int, created_by: int) -> str:
@@ -589,17 +594,15 @@ async def get_global_stats() -> dict:
             "total_chats": total_chats,
         }
 
-
-async def get_user_queue_memberships(user_id: int) -> list[dict]:
+async def get_recent_closed_queues(chat_id: int, limit: int = 10) -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT qm.queue_id, qm.position, q.name as queue_name, q.chat_id
-            FROM queue_members qm
-            JOIN queues q ON q.id = qm.queue_id
-            WHERE qm.user_id=$1 AND q.is_active=1
-            ORDER BY qm.position
-        """, user_id)
+            SELECT * FROM queues
+            WHERE chat_id=$1 AND is_active=0
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, chat_id, limit)
         return [dict(r) for r in rows]
 
 
@@ -618,17 +621,6 @@ async def get_all_users() -> list[int]:
             "SELECT user_id FROM user_profiles WHERE dm_available = 1")
         return [r['user_id'] for r in rows]
 
-
-async def get_user_known_chats(user_id: int) -> list[int]:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT DISTINCT q.chat_id FROM queue_members qm
-            JOIN queues q ON q.id = qm.queue_id
-            WHERE qm.user_id = $1
-        """, user_id)
-        return [r['chat_id'] for r in rows]
-    
 async def register_user_chat(user_id: int, chat_id: int):
     pool = await get_pool()
     async with pool.acquire() as conn:

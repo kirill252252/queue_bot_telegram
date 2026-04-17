@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import ChatMemberUpdated
 from aiogram.types import ErrorEvent
 
-import database as db
+import db
 from keyboards import (
     queue_list_keyboard, queue_actions_keyboard, queue_settings_keyboard,
     kick_members_keyboard, confirm_keyboard, cancel_keyboard,
@@ -109,6 +109,8 @@ async def after_leave(bot: Bot, queue_id: int, left_user_id: int,
     if was_first and members:
         await notify_became_first(bot, queue, members[0], queue["chat_id"])
     await db.cancel_reminders(queue_id, left_user_id)
+    if queue["max_slots"] > 0:
+        await notify_slot_available(bot, queue)
     return queue, members
 
 # берём все очереди из известных чатов для меню в личке
@@ -133,7 +135,7 @@ async def on_bot_added(event: ChatMemberUpdated, bot: Bot):
         _chat_names[chat.id] = chat.title
         await db.register_chat(chat.id, chat.title)
 
-@router.message(CommandStart())
+@router.message(CommandStart(), F.text.regexp(r"^/start(?:@[A-Za-z0-9_]+)?$"))
 async def cmd_start(message: Message):
     if message.chat.title:
         _chat_names[message.chat.id] = message.chat.title
@@ -278,11 +280,12 @@ async def cb_pm_queue(call: CallbackQuery):
     members = await db.get_queue_members(queue_id)
     text = format_queue_info(queue, members)
     user_in = any(m["user_id"] == call.from_user.id for m in members)
-    user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
+    is_frozen = user_in and await db.is_frozen(queue_id, call.from_user.id)
+    user_is_first = user_in and not is_frozen and bool(members) and members[0]["user_id"] == call.from_user.id
     is_full = queue["max_slots"] > 0 and len(members) >= queue["max_slots"]
     is_subscribed = await db.is_subscribed(queue_id, call.from_user.id)
     kb = pm_queue_actions_keyboard(queue_id, user_in, not queue["is_active"],
-                                   queue["chat_id"], user_is_first, is_full, is_subscribed)
+                                   queue["chat_id"], user_is_first, is_full, is_subscribed, is_frozen)
     try:
         await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
     except Exception:
@@ -300,7 +303,7 @@ async def cb_pm_join(call: CallbackQuery):
     # проверяем что пользователь состоит в группе
     try:
         chat_member = await call.bot.get_chat_member(queue["chat_id"], call.from_user.id)
-        if chat_member.status in ("left", "kicked", "restricted"):
+        if chat_member.status in ("left", "kicked"):
             await call.answer(
                 "❌ Ты не состоишь в этой группе.\nВступи в группу и попробуй снова.",
                 show_alert=True
@@ -384,12 +387,7 @@ async def cb_confirm_leave(call: CallbackQuery):
     was_first = left["position"] == 1
     await db.leave_queue(queue_id, call.from_user.id)
     await call.answer("🚪 Ты вышел из очереди.", show_alert=True)
-    queue = await db.get_queue(queue_id)
-    members = await db.get_queue_members(queue_id)
-    await notify_leave_public(call.bot, queue, left, queue["chat_id"])
-    if was_first and members:
-        await notify_became_first(call.bot, queue, members[0], queue["chat_id"])
-    await db.cancel_reminders(queue_id, call.from_user.id)
+    queue, _members = await after_leave(call.bot, queue_id, call.from_user.id, left, was_first)
     await safe_edit_text(call.message, 
         f"🚪 Ты вышел из очереди <b>«{queue['name']}»</b>. Спасибо!",
         parse_mode="HTML"
@@ -407,12 +405,7 @@ async def cb_done_next(call: CallbackQuery):
         return
     was_first = left["position"] == 1
     await db.leave_queue(queue_id, call.from_user.id)
-    await db.cancel_reminders(queue_id, call.from_user.id)
-    queue = await db.get_queue(queue_id)
-    members = await db.get_queue_members(queue_id)
-    await notify_leave_public(call.bot, queue, left, queue["chat_id"])
-    if was_first and members:
-        await notify_became_first(call.bot, queue, members[0], queue["chat_id"])
+    queue, _members = await after_leave(call.bot, queue_id, call.from_user.id, left, was_first)
     await call.answer("✅ Отлично! Следующий уведомлён.", show_alert=True)
     await safe_edit_text(call.message, 
         f"✅ <b>Ты прошёл очередь «{queue['name']}»!</b>\n\nСпасибо, следующий уведомлён 🎉",
@@ -677,22 +670,6 @@ async def cmd_myplace(message: Message):
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
-@router.message(Command("myplace"))
-async def cmd_myplace(message: Message):
-    if message.chat.type == "private":
-        await message.answer("Используй эту команду в группе.")
-        return
-    memberships = await db.get_user_queue_memberships(message.from_user.id)
-    chat_memberships = [m for m in memberships if m["chat_id"] == message.chat.id]
-    if not chat_memberships:
-        await message.answer("Ты не стоишь ни в одной очереди этого чата.")
-        return
-    lines = ["📍 <b>Твои места в очередях:</b>\n"]
-    for m in chat_memberships:
-        total = await db.get_member_count(m["queue_id"])
-        lines.append(f"📋 <b>{m['queue_name']}</b> — место <b>#{m['position']}</b> из {total}")
-    await message.answer("\n".join(lines), parse_mode="HTML")
-
 @router.message(Command("queue"))
 # /queue в группе — показываем список очередей
 async def cmd_queue(message: Message):
@@ -793,8 +770,6 @@ async def cb_leave(call: CallbackQuery):
         return
     await call.answer("🚪 Вышел.", show_alert=True)
     queue, members = await after_leave(call.bot, queue_id, call.from_user.id, left, was_first)
-    if queue["max_slots"] > 0:
-        await notify_slot_available(call.bot, queue)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
     await safe_edit_text(call.message, format_queue_info(queue, members),
@@ -996,6 +971,9 @@ async def cb_close(call: CallbackQuery):
 @router.callback_query(F.data.startswith("confirm_close:"))
 async def cb_confirm_close(call: CallbackQuery):
     queue_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, call.message.chat.id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
     await db.close_queue(queue_id)
     await call.answer("🔒 Закрыта.", show_alert=True)
     q = await db.get_queue(queue_id)
@@ -1017,6 +995,9 @@ async def cb_delete(call: CallbackQuery):
 @router.callback_query(F.data.startswith("confirm_delete:"))
 async def cb_confirm_delete(call: CallbackQuery):
     queue_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, call.message.chat.id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
     await db.delete_queue(queue_id)
     await call.answer("🗑 Удалена.", show_alert=True)
     queues = await db.get_chat_queues(call.message.chat.id)
@@ -1102,7 +1083,6 @@ async def cb_gen_invite(call: CallbackQuery):
         await call.answer("❌ Только администраторы.", show_alert=True)
         return
 
-    from config import BOT_TOKEN
     bot_info = await call.bot.get_me()
     token = await db.create_invite(queue_id, call.from_user.id)
     link = f"https://t.me/{bot_info.username}?start=invite_{token}"
@@ -1168,6 +1148,9 @@ async def cb_freeze_menu(call: CallbackQuery):
     queue_id = int(call.data.split(":")[1])
     member = await db.get_member(queue_id, call.from_user.id)
     if not member:
+        await call.answer("РўРµР±СЏ СѓР¶Рµ РЅРµС‚ РІ РѕС‡РµСЂРµРґРё.", show_alert=True)
+        return
+    if not member:
         await call.answer("Тебя нет в этой очереди.", show_alert=True)
         return
     frozen = await db.is_frozen(queue_id, call.from_user.id)
@@ -1194,13 +1177,14 @@ async def cb_freeze(call: CallbackQuery):
         await call.answer("Тебя нет в очереди.", show_alert=True)
         return
     await db.freeze_member(queue_id, call.from_user.id, minutes)
+    await db.cancel_reminders(queue_id, call.from_user.id)
     queue = await db.get_queue(queue_id)
     await call.answer(f"🧊 Заморожен на {minutes} мин. Позиция #{member['position']} сохранена.", show_alert=True)
     members = await db.get_queue_members(queue_id)
     text = format_queue_info(queue, members)
-    user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
+    user_is_first = False
     kb = pm_queue_actions_keyboard(queue_id, True, not queue["is_active"],
-                                   queue["chat_id"], user_is_first)
+                                   queue["chat_id"], user_is_first, is_frozen=True)
     await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("unfreeze:"))
@@ -1209,13 +1193,19 @@ async def cb_unfreeze(call: CallbackQuery):
     await db.unfreeze_member(queue_id, call.from_user.id)
     queue = await db.get_queue(queue_id)
     member = await db.get_member(queue_id, call.from_user.id)
-    await call.answer(f"✅ Разморожен! Позиция #{member['position']} активна.", show_alert=True)
+    if not member:
+        await call.answer("Тебя уже нет в очереди.", show_alert=True)
+        return
     members = await db.get_queue_members(queue_id)
-    text = format_queue_info(queue, members)
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
+    if user_is_first:
+        await notify_became_first(call.bot, queue, members[0], queue["chat_id"])
+    await call.answer(f"✅ Разморожен! Позиция #{member['position']} активна.", show_alert=True)
+    text = format_queue_info(queue, members)
     kb = pm_queue_actions_keyboard(queue_id, True, not queue["is_active"],
                                    queue["chat_id"], user_is_first)
     await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
+
 
 @router.callback_query(F.data.startswith("swap_menu:"))
 # показываем список с кем можно поменяться
@@ -1363,6 +1353,10 @@ async def cmd_addadmin(message: Message):
         await message.answer("❌ Только владелец бота может это делать.")
         return
 
+    if message.chat.type == "private":
+        await message.answer("❌ Команду нужно использовать в той группе, где нужно выдать права.")
+        return
+
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
@@ -1373,7 +1367,6 @@ async def cmd_addadmin(message: Message):
 
     target = args[1].strip().lstrip("@")
 
-    # ищем по username или user_id
     if target.isdigit():
         row = await db.get_user_profile(int(target))
     else:
@@ -1388,17 +1381,19 @@ async def cmd_addadmin(message: Message):
 
     user_id = row["user_id"]
     name = row["full_name"] or row["username"] or str(user_id)
-    added = await db.add_bot_admin(user_id)
+    added = await db.add_bot_admin(user_id, message.chat.id)
+    group_title = message.chat.title or str(message.chat.id)
 
     if added:
-        await message.answer(f"✅ {name} теперь бот-администратор во всех группах.")
+        await message.answer(f"✅ {name} теперь бот-администратор в этой группе.")
         from notifications import safe_dm
         await safe_dm(
-            message.bot, user_id,
-            "✅ Тебе выданы права администратора бота во всех группах."
+            message.bot,
+            user_id,
+            f"✅ Тебе выданы права администратора бота в группе «{group_title}»."
         )
     else:
-        await message.answer(f"ℹ️ {name} уже является бот-администратором.")
+        await message.answer(f"ℹ️ {name} уже является бот-администратором в этой группе.")
 
 
 @router.message(Command("removeadmin"))
@@ -1559,6 +1554,12 @@ async def fsm_broadcast_target(message: Message, state: FSMContext):
     if message.from_user.id != BOT_OWNER_ID:
         await state.clear()
         return
+    if not message.text:
+        await message.answer(
+            "Нужен @username или numeric user_id.",
+            reply_markup=cancel_keyboard()
+        )
+        return
     target = message.text.strip().lstrip("@")
     if target.isdigit():
         row = await db.get_user_profile(int(target))
@@ -1575,11 +1576,12 @@ async def fsm_broadcast_target(message: Message, state: FSMContext):
     name = row.get("full_name") or row.get("username") or str(row["user_id"])
     await state.update_data(broadcast_target_id=row["user_id"], broadcast_target_name=name)
     await message.answer(
-        f"👤 Пользователь: <b>{name}</b>\n\nНапиши сообщение или отправь фото:",
+        f"👤 Пользователь: <b>{name}</b>\n\nНапиши сообщение или отправь фото:", 
         reply_markup=cancel_keyboard(),
         parse_mode="HTML"
     )
     await state.set_state(BroadcastState.text)
+
 
 @router.message(BroadcastState.text)
 async def fsm_broadcast_text(message: Message, state: FSMContext):
@@ -1590,9 +1592,21 @@ async def fsm_broadcast_text(message: Message, state: FSMContext):
 
     data = await state.get_data()
     mode = data.get("broadcast_mode")
+    if mode not in {"all", "group", "user"}:
+        await state.clear()
+        await message.answer("❌ Сессия рассылки устарела. Запусти её заново.")
+        return
+
     text = message.text or message.caption or ""
     is_photo = bool(message.photo)
     photo_id = message.photo[-1].file_id if is_photo else None
+    if not is_photo and not text:
+        await message.answer(
+            "Отправь текстовое сообщение или фото с подписью.",
+            reply_markup=cancel_keyboard()
+        )
+        return
+
     await state.clear()
 
     async def send_one(target_id: int):

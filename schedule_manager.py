@@ -8,7 +8,7 @@
 import logging
 from datetime import datetime
 
-import database as db
+import db
 import schedule_db as sdb
 
 logger = logging.getLogger(__name__)
