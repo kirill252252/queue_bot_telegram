@@ -124,7 +124,8 @@ async def fsm_receive_schedule_photo(message: Message, state: FSMContext):
 
     result = await parse_schedule_image(image_bytes)
 
-    if not result or "error" in result or not result.get("lessons"):
+    # parse_schedule_image всегда возвращает {"groups": [...]} или None/"error"
+    if not result or "error" in result:
         await status_msg.edit_text(
             "❌ <b>Не удалось распознать расписание.</b>\n\n"
             "Советы:\n"
@@ -135,20 +136,42 @@ async def fsm_receive_schedule_photo(message: Message, state: FSMContext):
         )
         return
 
-    lessons = result["lessons"]
-    group_name = result.get("group_name") or "Группа"
+    groups_data = result.get("groups") or []
+    if not groups_data:
+        await status_msg.edit_text(
+            "❌ <b>Расписание не распознано — занятия не найдены.</b>\n\n"
+            "Попробуйте снять чётче или с другого угла.",
+            parse_mode="HTML",
+        )
+        return
 
-    # Сохраняем в БД
-    group_id = await sdb.upsert_group(chat_id, group_name)
-    await sdb.save_lessons(group_id, lessons)
+    # Сохраняем все группы из фото
+    total_lessons = 0
+    saved_groups = []
+    for g in groups_data:
+        group_name = g.get("group_name") or "Группа"
+        lessons = g.get("lessons") or []
+        if not lessons:
+            continue
+        group_id = await sdb.upsert_group(chat_id, group_name)
+        await sdb.save_lessons(group_id, lessons)
+        total_lessons += len(lessons)
+        saved_groups.append((group_name, len(lessons)))
 
-    formatted = format_schedule(lessons)
+    if not saved_groups:
+        await status_msg.edit_text("❌ Не удалось сохранить расписание — занятия не распознаны.")
+        return
+
+    groups_text = "\n".join(f"  👥 <b>{name}</b> — {cnt} занятий" for name, cnt in saved_groups)
+    # Форматируем первую группу для предпросмотра
+    preview = format_schedule(groups_data[0].get("lessons", []))
 
     await status_msg.edit_text(
         f"✅ <b>Расписание сохранено!</b>\n\n"
-        f"👥 Группа: <b>{group_name}</b>\n"
-        f"📚 Занятий распознано: {len(lessons)}\n"
-        f"{formatted}\n\n"
+        f"Распознано групп: <b>{len(saved_groups)}</b>\n"
+        f"{groups_text}\n"
+        f"Всего занятий: <b>{total_lessons}</b>\n"
+        f"\n{preview}\n\n"
         f"Очереди будут открываться автоматически в начале каждой пары.",
         parse_mode="HTML",
     )
@@ -475,17 +498,21 @@ async def on_group_photo(message: Message, state: FSMContext):
     if not changes:
         return
 
+    fallback_date = result.get("date")  # дата из заголовка листа изменений
+
     applied = []
     for change in changes:
         for group in groups:
-            await sdb.save_override(group["id"], change)
-            action = change.get("action") or change.get("type") or "?"
-            subject = change.get("subject") or "?"
-            applied.append(f"{action} — {subject}")
+            await sdb.save_override(group["id"], change, fallback_date=fallback_date)
+        action = change.get("action") or change.get("type") or "изменение"
+        subject = change.get("subject") or "?"
+        group_label = change.get("group") or "все группы"
+        applied.append(f"<b>{group_label}</b> лента {change.get('lesson_num','?')}: {action} — {subject}")
 
     if applied:
+        date_line = f"📅 Дата: {fallback_date}\n" if fallback_date else ""
         await message.reply(
-            "📢 <b>Изменения расписания распознаны и применены:</b>\n\n"
+            f"📢 <b>Изменения расписания применены:</b>\n{date_line}\n"
             + "\n".join(f"• {a}" for a in applied),
             parse_mode="HTML",
         )

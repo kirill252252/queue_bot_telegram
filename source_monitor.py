@@ -87,6 +87,7 @@ async def check_telegram_source(bot: Bot, source: dict, chat_id: int):
                 continue
 
             group_map = {g["group_name"].lower(): g for g in groups}
+            fallback_date = result.get("date")  # дата из заголовка листа изменений
 
             applied = []
             for change in result["changes"]:
@@ -94,7 +95,7 @@ async def check_telegram_source(bot: Bot, source: dict, chat_id: int):
                 targets = [group_map.get(gname)] if gname else groups
 
                 for g in [x for x in targets if x]:
-                    await sdb.save_override(g["id"], change)
+                    await sdb.save_override(g["id"], change, fallback_date=fallback_date)
                     # FIX: использовать 'action', а не 'type' (поле называется action)
                     action = change.get("action") or change.get("type") or "изменение"
                     subject = change.get("subject") or "?"
@@ -189,10 +190,11 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
             if not result or not result.get("changes"):
                 continue
 
+            fallback_date = result.get("date")
             applied = []
             for change in result["changes"]:
                 for g in groups:
-                    await sdb.save_override(g["id"], change)
+                    await sdb.save_override(g["id"], change, fallback_date=fallback_date)
                 action = change.get("action") or change.get("type") or "изменение"
                 subject = change.get("subject") or "?"
                 applied.append(f"{action}: {subject}")
