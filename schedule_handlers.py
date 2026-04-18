@@ -208,13 +208,21 @@ async def cb_show_week(call: CallbackQuery):
             continue
 
         lines = [f"📅 <b>Расписание — {group['group_name']}</b>"]
+        bells_cache = {b["lesson_num"]: b for b in await sdb.get_bells(chat_id)}
         for wd in sorted(week):
             lines.append(f"\n<b>{DAYS_FULL.get(wd, wd)}</b>")
-            for l in sorted(week[wd], key=lambda x: x.get("time_start", "")):
+            for l in sorted(week[wd], key=lambda x: x.get("lesson_num", 0)):
                 teacher = f" — {l['teacher']}" if l.get("teacher") else ""
                 room = f" [{l['room']}]" if l.get("room") else ""
+                ts = l.get("time_start") or ""
+                te = l.get("time_end") or ""
+                if not ts or not te:
+                    bell = bells_cache.get(l["lesson_num"])
+                    if bell:
+                        ts, te = bell["time_start"], bell["time_end"]
+                time_str = f" {ts}–{te}" if ts and te else ""
                 lines.append(
-                    f"  {l['lesson_num']}. {l['time_start']}–{l['time_end']} "
+                    f"  {l['lesson_num']}.{time_str} "
                     f"<b>{l['subject']}</b>{teacher}{room}"
                 )
         parts.append("\n".join(lines))
@@ -253,12 +261,20 @@ async def cb_show_today(call: CallbackQuery):
             parts.append(f"😴 <b>{group['group_name']}</b> — {day_name}: пар нет")
             continue
 
+        bells_cache = {b["lesson_num"]: b for b in await sdb.get_bells(chat_id)}
         lines = [f"📅 <b>{group['group_name']} — {day_name}</b>\n"]
         for l in lessons:
             teacher = f" — {l.get('teacher')}" if l.get("teacher") else ""
             room = f" [{l.get('room')}]" if l.get("room") else ""
+            ts = l.get("time_start") or ""
+            te = l.get("time_end") or ""
+            if not ts or not te:
+                bell = bells_cache.get(l["lesson_num"])
+                if bell:
+                    ts, te = bell["time_start"], bell["time_end"]
+            time_str = f" {ts}–{te}" if ts and te else ""
             lines.append(
-                f"{l['lesson_num']}. {l['time_start']}–{l['time_end']} "
+                f"{l['lesson_num']}.{time_str} "
                 f"<b>{l['subject']}</b>{teacher}{room}"
             )
         parts.append("\n".join(lines))
@@ -516,3 +532,267 @@ async def on_group_photo(message: Message, state: FSMContext):
             + "\n".join(f"• {a}" for a in applied),
             parse_mode="HTML",
         )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# РАСПИСАНИЕ ЗВОНКОВ — просмотр и редактирование
+# ═══════════════════════════════════════════════════════════════════
+
+def _bells_text(bells: list[dict]) -> str:
+    lines = ["🔔 <b>Расписание звонков</b>\n"]
+    for b in bells:
+        lines.append(f"  Пара <b>{b['lesson_num']}</b>: {b['time_start']} – {b['time_end']}")
+    return "\n".join(lines)
+
+
+def _bells_keyboard(chat_id: int, bells: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"✏️ Пара {b['lesson_num']}: {b['time_start']}–{b['time_end']}",
+            callback_data=f"bells_edit:{chat_id}:{b['lesson_num']}",
+        )]
+        for b in bells
+    ]
+    buttons += [
+        [InlineKeyboardButton(
+            text="➕ Добавить пару",
+            callback_data=f"bells_add:{chat_id}",
+        )],
+        [InlineKeyboardButton(
+            text="🔄 Сбросить к дефолту",
+            callback_data=f"bells_reset:{chat_id}",
+        )],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="sched_back_main")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@sched_router.callback_query(F.data.startswith("sched_bells:"))
+async def cb_bells_menu(call: CallbackQuery):
+    chat_id = int(call.data.split(":")[1])
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    bells = await sdb.get_bells(chat_id)
+    await call.message.edit_text(
+        _bells_text(bells) + "\n\nНажмите на пару чтобы изменить время:",
+        reply_markup=_bells_keyboard(chat_id, bells),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+# ─── Редактировать время пары ───
+
+class BellStates(StatesGroup):
+    waiting_time     = State()   # ждём HH:MM-HH:MM для существующей пары
+    waiting_add_num  = State()   # ждём номер пары при добавлении
+    waiting_add_time = State()   # ждём время при добавлении
+
+
+@sched_router.callback_query(F.data.startswith("bells_edit:"))
+async def cb_bells_edit(call: CallbackQuery, state: FSMContext):
+    _, chat_id_s, num_s = call.data.split(":")
+    chat_id, lesson_num = int(chat_id_s), int(num_s)
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    await state.update_data(chat_id=chat_id, lesson_num=lesson_num)
+    await state.set_state(BellStates.waiting_time)
+
+    bell = next(
+        (b for b in await sdb.get_bells(chat_id) if b["lesson_num"] == lesson_num),
+        None
+    )
+    current = f"{bell['time_start']}–{bell['time_end']}" if bell else "не задано"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🗑 Удалить пару из звонков",
+            callback_data=f"bells_del:{chat_id}:{lesson_num}"
+        ),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_bells:{chat_id}"),
+    ]])
+    await call.message.answer(
+        f"⏰ <b>Пара {lesson_num}</b> — сейчас: <code>{current}</code>\n\n"
+        f"Введите новое время в формате <b>HH:MM-HH:MM</b>\n"
+        f"Например: <code>09:45-11:20</code>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@sched_router.message(BellStates.waiting_time)
+async def fsm_bells_receive_time(message: Message, state: FSMContext):
+    import re
+    data = await state.get_data()
+    chat_id    = data["chat_id"]
+    lesson_num = data["lesson_num"]
+
+    m = re.match(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})", message.text.strip())
+    if not m:
+        await message.answer(
+            "❌ Неверный формат. Введите как <b>09:45-11:20</b>",
+            parse_mode="HTML"
+        )
+        return
+
+    await state.clear()
+    ts, te = m.group(1), m.group(2)
+    await sdb.set_bell(chat_id, lesson_num, ts, te)
+
+    bells = await sdb.get_bells(chat_id)
+    await message.answer(
+        f"✅ Пара <b>{lesson_num}</b>: {ts} – {te} сохранено.\n\n"
+        + _bells_text(bells),
+        reply_markup=_bells_keyboard(chat_id, bells),
+        parse_mode="HTML",
+    )
+
+
+# ─── Добавить новую пару ───
+
+@sched_router.callback_query(F.data.startswith("bells_add:"))
+async def cb_bells_add(call: CallbackQuery, state: FSMContext):
+    chat_id = int(call.data.split(":")[1])
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    bells = await sdb.get_bells(chat_id)
+    next_num = max((b["lesson_num"] for b in bells), default=0) + 1
+
+    await state.update_data(chat_id=chat_id, lesson_num=next_num)
+    await state.set_state(BellStates.waiting_add_time)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_bells:{chat_id}")
+    ]])
+    await call.message.answer(
+        f"➕ <b>Новая пара {next_num}</b>\n\n"
+        f"Введите время в формате <b>HH:MM-HH:MM</b>\n"
+        f"Например: <code>18:50-20:25</code>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@sched_router.message(BellStates.waiting_add_time)
+async def fsm_bells_add_time(message: Message, state: FSMContext):
+    import re
+    data = await state.get_data()
+    chat_id    = data["chat_id"]
+    lesson_num = data["lesson_num"]
+
+    m = re.match(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})", message.text.strip())
+    if not m:
+        await message.answer(
+            "❌ Неверный формат. Введите как <b>18:50-20:25</b>",
+            parse_mode="HTML"
+        )
+        return
+
+    await state.clear()
+    ts, te = m.group(1), m.group(2)
+    await sdb.set_bell(chat_id, lesson_num, ts, te)
+
+    bells = await sdb.get_bells(chat_id)
+    await message.answer(
+        f"✅ Пара <b>{lesson_num}</b>: {ts} – {te} добавлена.\n\n"
+        + _bells_text(bells),
+        reply_markup=_bells_keyboard(chat_id, bells),
+        parse_mode="HTML",
+    )
+
+
+# ─── Удалить звонок пары ───
+
+@sched_router.callback_query(F.data.startswith("bells_del:"))
+async def cb_bells_del(call: CallbackQuery, state: FSMContext):
+    _, chat_id_s, num_s = call.data.split(":")
+    chat_id, lesson_num = int(chat_id_s), int(num_s)
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    await state.clear()
+
+    # Удаляем только кастомный звонок, дефолт останется
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM schedule_bells WHERE chat_id = $1 AND lesson_num = $2",
+                chat_id, lesson_num
+            )
+    else:
+        import schedule_db as _sdb_local
+        await _sdb_local._execute(
+            "DELETE FROM schedule_bells WHERE chat_id = ? AND lesson_num = ?",
+            (chat_id, lesson_num)
+        )
+
+    bells = await sdb.get_bells(chat_id)
+    await call.answer(f"✅ Пара {lesson_num} удалена из звонков (восстановлен дефолт).")
+    await call.message.edit_text(
+        _bells_text(bells) + "\n\nНажмите на пару чтобы изменить время:",
+        reply_markup=_bells_keyboard(chat_id, bells),
+        parse_mode="HTML",
+    )
+
+
+# ─── Сброс к дефолту ───
+
+@sched_router.callback_query(F.data.startswith("bells_reset:"))
+async def cb_bells_reset(call: CallbackQuery):
+    chat_id = int(call.data.split(":")[1])
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Да, сбросить", callback_data=f"bells_reset_confirm:{chat_id}"),
+        InlineKeyboardButton(text="❌ Отмена",        callback_data=f"sched_bells:{chat_id}"),
+    ]])
+    await call.message.edit_text(
+        "⚠️ <b>Сбросить расписание звонков к дефолтному?</b>\n\n"
+        "Дефолт:\n"
+        + "\n".join(f"  Пара {n}: {ts}–{te}" for n, ts, te in sdb.DEFAULT_BELLS),
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@sched_router.callback_query(F.data.startswith("bells_reset_confirm:"))
+async def cb_bells_reset_confirm(call: CallbackQuery):
+    chat_id = int(call.data.split(":")[1])
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    await sdb.reset_bells(chat_id)
+    bells = await sdb.get_bells(chat_id)
+    await call.message.edit_text(
+        "✅ Расписание звонков сброшено к дефолтному.\n\n"
+        + _bells_text(bells),
+        reply_markup=_bells_keyboard(chat_id, bells),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+def _get_db_type():
+    from config import DB_TYPE
+    return DB_TYPE

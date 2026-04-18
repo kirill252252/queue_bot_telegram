@@ -104,9 +104,19 @@ async def process_schedule_tick(bot):
             if lesson.get("skip_queue"):
                 continue
 
-            time_start = lesson["time_start"]
-            time_end = lesson["time_end"]
             lesson_num = lesson.get("lesson_num")
+
+            # Если у занятия нет явного времени — берём из расписания звонков
+            time_start = lesson.get("time_start") or ""
+            time_end   = lesson.get("time_end") or ""
+            if not time_start or not time_end:
+                time_start, time_end = await sdb.get_bell_time(chat_id, lesson_num)
+                lesson = dict(lesson)  # не мутируем оригинал
+                lesson["time_start"] = time_start
+                lesson["time_end"]   = time_end
+
+            if not time_start or not time_end:
+                continue  # время неизвестно — пропускаем
 
             if current_time == time_start:
                 await _open_lesson_queue(bot, group, lesson, today, chat_id)
