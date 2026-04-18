@@ -110,6 +110,19 @@ async def _init_sqlite():
             )
         """)
 
+
+        # Расписание звонков (время начала/конца каждой пары для чата)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS schedule_bells (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                lesson_num INTEGER NOT NULL,
+                time_start TEXT NOT NULL,
+                time_end TEXT NOT NULL,
+                UNIQUE(chat_id, lesson_num)
+            )
+        """)
+
         await db.commit()
 
 
@@ -181,6 +194,17 @@ async def _init_pg():
                 last_post_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(chat_id, source_type, source_id)
+            )
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule_bells (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                lesson_num INTEGER NOT NULL,
+                time_start TEXT NOT NULL,
+                time_end TEXT NOT NULL,
+                UNIQUE(chat_id, lesson_num)
             )
         """)
 
@@ -716,3 +740,117 @@ async def get_all_lessons_today() -> list[dict]:
         WHERE l.weekday = ? AND l.is_active = 1
         ORDER BY l.time_start
     """, (date_str, weekday))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# РАСПИСАНИЕ ЗВОНКОВ (schedule_bells)
+# ═══════════════════════════════════════════════════════════════════
+
+# Звонки по умолчанию (типовое расписание колледжа)
+DEFAULT_BELLS = [
+    (1, "08:00", "09:35"),
+    (2, "09:45", "11:20"),
+    (3, "11:30", "13:05"),
+    (4, "13:35", "15:10"),
+    (5, "15:20", "16:55"),
+    (6, "17:05", "18:40"),
+    (7, "18:50", "20:25"),
+]
+
+
+async def get_bells(chat_id: int) -> list[dict]:
+    """
+    Возвращает расписание звонков для чата.
+    Если не настроено — возвращает DEFAULT_BELLS.
+    """
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM schedule_bells WHERE chat_id = $1 ORDER BY lesson_num",
+                chat_id
+            )
+            result = [dict(r) for r in rows]
+    else:
+        result = await _fetchall(
+            "SELECT * FROM schedule_bells WHERE chat_id = ? ORDER BY lesson_num",
+            (chat_id,)
+        )
+
+    if not result:
+        # Возвращаем дефолт в том же формате
+        return [
+            {"chat_id": chat_id, "lesson_num": n, "time_start": ts, "time_end": te}
+            for n, ts, te in DEFAULT_BELLS
+        ]
+    return result
+
+
+async def get_bell(chat_id: int, lesson_num: int) -> dict | None:
+    """Получить звонок для конкретной пары."""
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM schedule_bells WHERE chat_id = $1 AND lesson_num = $2",
+                chat_id, lesson_num
+            )
+            return dict(row) if row else None
+    rows = await _fetchall(
+        "SELECT * FROM schedule_bells WHERE chat_id = ? AND lesson_num = ?",
+        (chat_id, lesson_num)
+    )
+    return rows[0] if rows else None
+
+
+async def set_bell(chat_id: int, lesson_num: int, time_start: str, time_end: str):
+    """Установить / обновить звонок для пары."""
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO schedule_bells (chat_id, lesson_num, time_start, time_end)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (chat_id, lesson_num)
+                DO UPDATE SET time_start = EXCLUDED.time_start,
+                              time_end   = EXCLUDED.time_end
+            """, chat_id, lesson_num, time_start, time_end)
+        return
+    await _execute("""
+        INSERT INTO schedule_bells (chat_id, lesson_num, time_start, time_end)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (chat_id, lesson_num)
+        DO UPDATE SET time_start = excluded.time_start,
+                      time_end   = excluded.time_end
+    """, (chat_id, lesson_num, time_start, time_end))
+
+
+async def reset_bells(chat_id: int):
+    """Сбросить расписание звонков чата к дефолту (удалить кастомные)."""
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM schedule_bells WHERE chat_id = $1", chat_id
+            )
+        return
+    await _execute("DELETE FROM schedule_bells WHERE chat_id = ?", (chat_id,))
+
+
+async def get_bell_time(chat_id: int, lesson_num: int) -> tuple[str, str]:
+    """
+    Вернуть (time_start, time_end) для пары.
+    Ищет сначала кастомный звонок, потом дефолт.
+    """
+    bell = await get_bell(chat_id, lesson_num)
+    if bell:
+        return bell["time_start"], bell["time_end"]
+    # Поиск в дефолтных
+    for num, ts, te in DEFAULT_BELLS:
+        if num == lesson_num:
+            return ts, te
+    return "", ""
