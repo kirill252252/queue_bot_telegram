@@ -854,3 +854,139 @@ async def get_bell_time(chat_id: int, lesson_num: int) -> tuple[str, str]:
         if num == lesson_num:
             return ts, te
     return "", ""
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CRUD ДЛЯ РЕДАКТОРА ЗАНЯТИЙ
+# ═══════════════════════════════════════════════════════════════════
+
+async def get_lesson_by_id(lesson_id: int) -> dict | None:
+    """Получить занятие по ID — нужно чтобы показать карточку для редактирования."""
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM schedule_lessons WHERE id = $1", lesson_id)
+            return dict(row) if row else None
+    rows = await _fetchall("SELECT * FROM schedule_lessons WHERE id = ?", (lesson_id,))
+    return rows[0] if rows else None
+
+
+async def update_lesson_field(lesson_id: int, field: str, value: str):
+    """
+    Обновить одно поле занятия.
+    Белый список полей — защита от SQL-инъекций.
+    """
+    allowed = {"subject", "teacher", "room", "time_start", "time_end", "lesson_num", "weekday"}
+    if field not in allowed:
+        raise ValueError(f"Field {field!r} not allowed for update")
+
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f'UPDATE schedule_lessons SET "{field}" = $1 WHERE id = $2',
+                value or None, lesson_id
+            )
+        return
+    await _execute(
+        f'UPDATE schedule_lessons SET "{field}" = ? WHERE id = ?',
+        (value or None, lesson_id)
+    )
+
+
+async def delete_lesson(lesson_id: int):
+    """Удалить занятие из базового расписания навсегда."""
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM schedule_lessons WHERE id = $1", lesson_id)
+        return
+    await _execute("DELETE FROM schedule_lessons WHERE id = ?", (lesson_id,))
+
+
+async def add_single_lesson(group_id: int, lesson: dict):
+    """
+    Добавить одно занятие к группе — НЕ удаляет остальные.
+    Используется в редакторе при ручном добавлении пары.
+    (В отличие от save_lessons, которая удаляет всё и заново вставляет.)
+    """
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO schedule_lessons
+                    (group_id, weekday, lesson_num, subject,
+                     time_start, time_end, room, teacher, skip_queue)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            """, group_id,
+                lesson["weekday"], lesson["lesson_num"],
+                lesson["subject"],
+                lesson.get("time_start") or "",
+                lesson.get("time_end") or "",
+                lesson.get("room"),
+                lesson.get("teacher"),
+                int(lesson.get("skip_queue", 0)))
+        return
+
+    from database import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO schedule_lessons
+                (group_id, weekday, lesson_num, subject,
+                 time_start, time_end, room, teacher, skip_queue)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (group_id,
+              lesson["weekday"], lesson["lesson_num"],
+              lesson["subject"],
+              lesson.get("time_start") or "",
+              lesson.get("time_end") or "",
+              lesson.get("room"),
+              lesson.get("teacher"),
+              int(lesson.get("skip_queue", 0))))
+        await db.commit()
+
+
+async def delete_override(group_id: int, lesson_num: int, date_str: str):
+    """
+    Удалить конкретный override на дату.
+    Используется для восстановления отменённой пары.
+    """
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                DELETE FROM schedule_overrides
+                WHERE group_id = $1 AND lesson_num = $2
+                  AND override_date = $3 AND action = 'cancel'
+            """, group_id, lesson_num, date_str)
+        return
+    await _execute("""
+        DELETE FROM schedule_overrides
+        WHERE group_id = ? AND lesson_num = ?
+          AND override_date = ? AND action = 'cancel'
+    """, (group_id, lesson_num, date_str))
+
+
+async def delete_bell(chat_id: int, lesson_num: int):
+    """
+    Удалить один кастомный звонок.
+    После удаления пара вернётся к дефолтному времени.
+    """
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM schedule_bells WHERE chat_id = $1 AND lesson_num = $2",
+                chat_id, lesson_num
+            )
+        return
+    await _execute(
+        "DELETE FROM schedule_bells WHERE chat_id = ? AND lesson_num = ?",
+        (chat_id, lesson_num)
+    )
