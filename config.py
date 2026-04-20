@@ -58,3 +58,8 @@ NOTIFY_APPROACHING = int(os.getenv("NOTIFY_APPROACHING", "3"))
 # ── Администрирование ─────────────────────────────────────────────────────────
 # User ID владельца бота — только он может назначать бот-админов
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
+
+# ── Часовой пояс ─────────────────────────────────────────────────────────────
+# Смещение от UTC в часах. Railway работает на UTC.
+# Ваше время UTC+4 → TZ_OFFSET=4, МСК (UTC+3) → TZ_OFFSET=3
+TZ_OFFSET = int(os.getenv("TZ_OFFSET", "0"))

@@ -44,6 +44,10 @@ DAYS_SHORT = ["", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 # Ключевые слова для авто-распознавания изменений из фото
 CHANGE_KEYWORDS = ["расписани", "изменени", "отмен", "перенос", "замен", "пара", "лекц", "семинар"]
 
+# Метки типов недели для отображения
+WEEK_TYPE_LABELS = {0: "каждую неделю", 1: "нечётные недели", 2: "чётные недели"}
+WEEK_TYPE_ICONS  = {0: "📆", 1: "1️⃣", 2: "2️⃣"}
+
 
 # ═══════════════════════════════════════════════════════════════════
 # FSM — состояния для всех диалогов с пользователем
@@ -108,6 +112,14 @@ def _lesson_time_str(lesson: dict, bells_cache: dict) -> str:
         if bell:
             ts, te = bell["time_start"], bell["time_end"]
     return f" {ts}–{te}" if ts and te else ""
+
+
+def _lesson_week_icon(lesson: dict) -> str:
+    """Иконка типа недели: 1️⃣ нечётная, 2️⃣ чётная, пусто = каждую."""
+    wt = lesson.get("week_type", 0)
+    if lesson.get("is_event"):
+        return " 🎓"  # мероприятие
+    return {1: " 1️⃣", 2: " 2️⃣"}.get(wt, "")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -278,7 +290,8 @@ async def cb_show_week(call: CallbackQuery):
                 room    = f" [{l['room']}]" if l.get("room") else ""
                 time_s  = _lesson_time_str(l, bells_cache)
                 skip_s  = " 🔕" if l.get("skip_queue") else ""
-                lines.append(f"  {l['lesson_num']}.{time_s} <b>{l['subject']}</b>{teacher}{room}{skip_s}")
+                week_s  = _lesson_week_icon(l)
+                lines.append(f"  {l['lesson_num']}.{time_s}{week_s} <b>{l['subject']}</b>{teacher}{room}{skip_s}")
         parts.append("\n".join(lines))
 
     if not parts:
@@ -317,7 +330,8 @@ async def cb_show_today(call: CallbackQuery):
             teacher = f" — {l.get('teacher')}" if l.get("teacher") else ""
             room    = f" [{l.get('room')}]" if l.get("room") else ""
             time_s  = _lesson_time_str(l, bells_cache)
-            lines.append(f"{l['lesson_num']}.{time_s} <b>{l['subject']}</b>{teacher}{room}")
+            week_s  = _lesson_week_icon(l)
+            lines.append(f"{l['lesson_num']}.{time_s}{week_s} <b>{l['subject']}</b>{teacher}{room}")
         parts.append("\n".join(lines))
 
     await call.message.answer("\n\n".join(parts) if parts else "Сегодня пар нет 🎉", parse_mode="HTML")
@@ -611,6 +625,10 @@ def _lesson_actions_keyboard(chat_id: int, group_id: int, lesson_id: int, wd: in
         ],
         [
             InlineKeyboardButton(text="🔔/🔕 Очередь",   callback_data=f"sched_toggle_skip2:{chat_id}:{lesson_id}:{group_id}:{wd}"),
+            InlineKeyboardButton(text="📆 Неделя",         callback_data=f"sched_toggle_week:{chat_id}:{lesson_id}:{group_id}:{wd}"),
+        ],
+        [
+            InlineKeyboardButton(text="🎓 Мероприятие",   callback_data=f"sched_toggle_event:{chat_id}:{lesson_id}:{group_id}:{wd}"),
             InlineKeyboardButton(text="🗑 Удалить",        callback_data=f"sched_del_lesson:{chat_id}:{group_id}:{lesson_id}:{wd}"),
         ],
         [InlineKeyboardButton(text="◀️ Назад", callback_data=f"sched_edit_day:{chat_id}:{group_id}:{wd}")],
@@ -635,6 +653,10 @@ async def cb_edit_lesson(call: CallbackQuery):
     bells_cache = {b["lesson_num"]: b for b in await sdb.get_bells(chat_id)}
     time_s = _lesson_time_str(lesson, bells_cache)
 
+    wt   = lesson.get("week_type", 0)
+    ev   = lesson.get("is_event", 0)
+    wt_s = WEEK_TYPE_LABELS.get(wt, "?")
+    ev_s = " | 🎓 мероприятие" if ev else ""
     text = (
         f"✏️ <b>Редактирование занятия</b>\n\n"
         f"📚 Предмет: <b>{lesson['subject']}</b>\n"
@@ -642,7 +664,8 @@ async def cb_edit_lesson(call: CallbackQuery):
         f"🏫 Аудитория: {lesson.get('room') or '—'}\n"
         f"⏰ Время:{time_s or ' —'}\n"
         f"🔔 Очередь: {'выкл 🔕' if lesson.get('skip_queue') else 'вкл 🔔'}\n"
-        f"📅 {DAYS_FULL.get(wd)}, пара {lesson['lesson_num']}"
+        f"📅 {DAYS_FULL.get(wd)}, пара {lesson['lesson_num']}\n"
+        f"📆 Неделя: <b>{wt_s}</b>{ev_s}"
     )
     await call.message.edit_text(
         text,
@@ -1417,3 +1440,278 @@ async def on_group_photo(message: Message, state: FSMContext):
             + "\n".join(f"• {a}" for a in applied),
             parse_mode="HTML",
         )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ПЕРЕКЛЮЧЕНИЕ ТИПА НЕДЕЛИ И ФЛАГА МЕРОПРИЯТИЯ
+# ═══════════════════════════════════════════════════════════════════
+
+@sched_router.callback_query(F.data.startswith("sched_toggle_week:"))
+async def cb_toggle_week_type(call: CallbackQuery):
+    """
+    Переключает тип недели для занятия по циклу:
+    0 (каждую) → 1 (нечётные) → 2 (чётные) → 0
+    Это нужно для пар через дробь — когда на одной неделе один предмет, на другой другой.
+    """
+    _, chat_id_s, lesson_id_s, group_id_s, wd_s = call.data.split(":")
+    chat_id, lesson_id, group_id, wd = int(chat_id_s), int(lesson_id_s), int(group_id_s), int(wd_s)
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    lesson = await sdb.get_lesson_by_id(lesson_id)
+    if not lesson:
+        await call.answer("Занятие не найдено.", show_alert=True)
+        return
+
+    # Цикл: 0 → 1 → 2 → 0
+    current_wt = lesson.get("week_type", 0)
+    new_wt = (current_wt + 1) % 3
+
+    await sdb.update_lesson_field(lesson_id, "week_type", str(new_wt))
+    label = WEEK_TYPE_LABELS.get(new_wt, "?")
+    await call.answer(f"📆 Неделя: {label}")
+
+    # Перерисовываем карточку
+    call.data = f"sched_edit_lesson:{chat_id}:{group_id}:{lesson_id}:{wd}"
+    await cb_edit_lesson(call)
+
+
+@sched_router.callback_query(F.data.startswith("sched_toggle_event:"))
+async def cb_toggle_event(call: CallbackQuery):
+    """
+    Переключает флаг is_event (мероприятие/обычное занятие).
+    Мероприятия (Разговоры о важном и т.п.) не создают очередь и не открывают её.
+    """
+    _, chat_id_s, lesson_id_s, group_id_s, wd_s = call.data.split(":")
+    chat_id, lesson_id, group_id, wd = int(chat_id_s), int(lesson_id_s), int(group_id_s), int(wd_s)
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    lesson = await sdb.get_lesson_by_id(lesson_id)
+    if not lesson:
+        await call.answer("Занятие не найдено.", show_alert=True)
+        return
+
+    new_val = 0 if lesson.get("is_event", 0) else 1
+    await sdb.update_lesson_field(lesson_id, "is_event", str(new_val))
+
+    status = "🎓 Помечено как мероприятие (очереди не будет)" if new_val else "📚 Обычное занятие (очередь создаётся)"
+    await call.answer(status, show_alert=True)
+
+    call.data = f"sched_edit_lesson:{chat_id}:{group_id}:{lesson_id}:{wd}"
+    await cb_edit_lesson(call)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ПОКАЗ РАСПИСАНИЯ ПО НЕДЕЛЯМ — отдельные команды для чётной/нечётной
+# ═══════════════════════════════════════════════════════════════════
+
+@sched_router.callback_query(F.data == "sched_show_odd")
+async def cb_show_odd_week(call: CallbackQuery):
+    """Показывает расписание только нечётной недели."""
+    await _show_filtered_week(call, week_type=1)
+
+
+@sched_router.callback_query(F.data == "sched_show_even")
+async def cb_show_even_week(call: CallbackQuery):
+    """Показывает расписание только чётной недели."""
+    await _show_filtered_week(call, week_type=2)
+
+
+async def _show_filtered_week(call: CallbackQuery, week_type: int):
+    """Показывает расписание недели с фильтром по типу (нечётная/чётная)."""
+    chat_id = call.message.chat.id
+    groups  = await sdb.get_chat_groups(chat_id)
+    if not groups:
+        await call.answer("Расписание не загружено.", show_alert=True)
+        return
+
+    bells_cache = {b["lesson_num"]: b for b in await sdb.get_bells(chat_id)}
+    week_name   = "Нечётная неделя 1️⃣" if week_type == 1 else "Чётная неделя 2️⃣"
+
+    parts = []
+    for group in groups:
+        week = await get_week_schedule(group["id"])
+        if not week:
+            continue
+
+        lines = [f"📅 <b>{group['group_name']} — {week_name}</b>"]
+        for wd in sorted(week):
+            # Фильтруем только нужный тип + общие занятия
+            day_lessons = [
+                l for l in week[wd]
+                if l.get("week_type", 0) in (0, week_type)
+                and not l.get("is_event")
+            ]
+            if not day_lessons:
+                continue
+            lines.append(f"\n<b>{DAYS_FULL.get(wd, wd)}</b>")
+            for l in sorted(day_lessons, key=lambda x: x.get("lesson_num", 0)):
+                teacher = f" — {l['teacher']}" if l.get("teacher") else ""
+                room    = f" [{l['room']}]" if l.get("room") else ""
+                time_s  = _lesson_time_str(l, bells_cache)
+                lines.append(f"  {l['lesson_num']}.{time_s} <b>{l['subject']}</b>{teacher}{room}")
+        parts.append("\n".join(lines))
+
+    if not parts:
+        await call.answer("Нет занятий.", show_alert=True)
+        return
+
+    for chunk in parts:
+        await call.message.answer(chunk, parse_mode="HTML")
+    await call.answer()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# НАСТРОЙКИ УВЕДОМЛЕНИЙ РАСПИСАНИЯ
+# ═══════════════════════════════════════════════════════════════════
+
+class NotifyBeforeState(StatesGroup):
+    waiting_minutes = State()  # ждём количество минут для предупреждения заранее
+
+
+def _notify_settings_text(settings: dict) -> str:
+    """Форматируем текст с текущими настройками уведомлений расписания."""
+    from config import TZ_OFFSET
+    on_open  = "✅ вкл" if settings.get("notify_on_open",  1) else "❌ выкл"
+    on_close = "✅ вкл" if settings.get("notify_on_close", 1) else "❌ выкл"
+    before   = settings.get("notify_before_min", 0)
+    before_s = f"{before} мин" if before > 0 else "выкл"
+    tz_s     = f"UTC+{TZ_OFFSET}" if TZ_OFFSET >= 0 else f"UTC{TZ_OFFSET}"
+    return (
+        f"📣 <b>Настройки уведомлений расписания</b>\n\n"
+        f"🟢 При начале пары:       <b>{on_open}</b>\n"
+        f"🔴 При конце пары:        <b>{on_close}</b>\n"
+        f"⏰ Предупреждать заранее: <b>{before_s}</b>\n\n"
+        f"🕐 Часовой пояс: <b>{tz_s}</b>\n"
+        f"<i>Изменить пояс: добавьте TZ_OFFSET=N в .env</i>"
+    )
+
+
+def _notify_settings_keyboard(chat_id: int, settings: dict) -> InlineKeyboardMarkup:
+    """Кнопки управления уведомлениями расписания."""
+    on_open  = settings.get("notify_on_open",  1)
+    on_close = settings.get("notify_on_close", 1)
+    before   = settings.get("notify_before_min", 0)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{'✅' if on_open  else '❌'} Начало пары",
+            callback_data=f"sched_ntoggle:{chat_id}:notify_on_open",
+        )],
+        [InlineKeyboardButton(
+            text=f"{'✅' if on_close else '❌'} Конец пары",
+            callback_data=f"sched_ntoggle:{chat_id}:notify_on_close",
+        )],
+        [InlineKeyboardButton(
+            text=f"⏰ За {before} мин" if before > 0 else "⏰ Заранее: выкл",
+            callback_data=f"sched_nbefore:{chat_id}",
+        )],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="sched_back_main")],
+    ])
+
+
+@sched_router.callback_query(F.data.startswith("sched_notify:"))
+async def cb_notify_settings(call: CallbackQuery):
+    """Меню настроек уведомлений расписания."""
+    chat_id = int(call.data.split(":")[1])
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+    settings = await sdb.get_chat_schedule_settings(chat_id)
+    await call.message.edit_text(
+        _notify_settings_text(settings),
+        reply_markup=_notify_settings_keyboard(chat_id, settings),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@sched_router.callback_query(F.data.startswith("sched_ntoggle:"))
+async def cb_notify_toggle(call: CallbackQuery):
+    """Переключает одну настройку уведомлений (вкл/выкл)."""
+    parts   = call.data.split(":")
+    chat_id = int(parts[1])
+    field   = parts[2]
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+    new_val = await sdb.toggle_chat_schedule_setting(chat_id, field)
+    label   = "Начало пары" if field == "notify_on_open" else "Конец пары"
+    await call.answer(f"{'✅ Вкл' if new_val else '❌ Выкл'}: {label}")
+    settings = await sdb.get_chat_schedule_settings(chat_id)
+    await call.message.edit_text(
+        _notify_settings_text(settings),
+        reply_markup=_notify_settings_keyboard(chat_id, settings),
+        parse_mode="HTML",
+    )
+
+
+@sched_router.callback_query(F.data.startswith("sched_nbefore:"))
+async def cb_notify_before(call: CallbackQuery, state: FSMContext):
+    """Настройка: предупреждать о паре за N минут до начала."""
+    chat_id = int(call.data.split(":")[1])
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+    await state.update_data(chat_id=chat_id)
+    await state.set_state(NotifyBeforeState.waiting_minutes)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="5 мин",   callback_data=f"sched_nbefore_set:{chat_id}:5"),
+            InlineKeyboardButton(text="10 мин",  callback_data=f"sched_nbefore_set:{chat_id}:10"),
+            InlineKeyboardButton(text="15 мин",  callback_data=f"sched_nbefore_set:{chat_id}:15"),
+            InlineKeyboardButton(text="30 мин",  callback_data=f"sched_nbefore_set:{chat_id}:30"),
+        ],
+        [InlineKeyboardButton(text="Выкл (0)", callback_data=f"sched_nbefore_set:{chat_id}:0")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_notify:{chat_id}")],
+    ])
+    await call.message.answer(
+        "⏰ <b>Предупреждать о начале пары заранее</b>\n\n"
+        "Выберите время или введите число минут (0 = выключить):",
+        reply_markup=kb, parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@sched_router.callback_query(F.data.startswith("sched_nbefore_set:"))
+async def cb_notify_before_set(call: CallbackQuery, state: FSMContext):
+    """Сохраняем значение «заранее» через кнопку."""
+    parts   = call.data.split(":")
+    chat_id = int(parts[1])
+    minutes = int(parts[2])
+    await state.clear()
+    await sdb.update_chat_schedule_settings(chat_id, notify_before_min=minutes)
+    await call.answer(f"✅ {'Выключено' if minutes == 0 else f'За {minutes} мин'}")
+    settings = await sdb.get_chat_schedule_settings(chat_id)
+    await call.message.edit_text(
+        _notify_settings_text(settings),
+        reply_markup=_notify_settings_keyboard(chat_id, settings),
+        parse_mode="HTML",
+    )
+
+
+@sched_router.message(NotifyBeforeState.waiting_minutes)
+async def fsm_notify_before_minutes(message: Message, state: FSMContext):
+    """Сохраняем значение «заранее» из текстового ввода."""
+    data    = await state.get_data()
+    chat_id = data["chat_id"]
+    if not message.text or not message.text.strip().isdigit():
+        await message.answer("❌ Введите число минут (например: 10) или 0 чтобы выключить.")
+        return
+    minutes = int(message.text.strip())
+    if not (0 <= minutes <= 120):
+        await message.answer("❌ Допустимый диапазон: 0–120 минут.")
+        return
+    await state.clear()
+    await sdb.update_chat_schedule_settings(chat_id, notify_before_min=minutes)
+    settings = await sdb.get_chat_schedule_settings(chat_id)
+    await message.answer(
+        f"✅ Сохранено: {'выключено' if minutes == 0 else f'за {minutes} мин'}.\n\n"
+        + _notify_settings_text(settings),
+        reply_markup=_notify_settings_keyboard(chat_id, settings),
+        parse_mode="HTML",
+    )

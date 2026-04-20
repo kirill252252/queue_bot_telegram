@@ -100,7 +100,7 @@ async def main():
     # background tasks (ОДИН цикл вместо 2–3)
     tasks = [
         asyncio.create_task(background_loop(bot), name="background_loop"),
-        asyncio.create_task(source_monitor_loop(bot), name="source_monitor_loop"),
+        asyncio.create_task(source_monitor_loop(bot, interval_minutes=360), name="source_monitor_loop"),  # раз в 6 часов
     ]
 
     # ─────────────────────────────
