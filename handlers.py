@@ -888,8 +888,17 @@ async def cb_queue_settings(call: CallbackQuery):
         await call.answer("❌ Только администраторы.", show_alert=True)
         return
     q = await db.get_queue(queue_id)
+    members = await db.get_queue_members(queue_id)
+    week_type = 0
+    try:
+        import schedule_db as _sdb
+        week_type = _sdb.get_current_week_type()
+    except Exception:
+        pass
+    week_label = {0: "", 1: " | 📅 Нечётная неделя", 2: " | 📅 Чётная неделя"}.get(week_type, "")
     await safe_edit_text(call.message, 
-        f"⚙️ <b>Настройки «{q['name']}»</b>",
+        f"⚙️ <b>Настройки «{q['name']}»</b>{week_label}\n\n"
+        f"👥 Сейчас в очереди: <b>{len(members)}</b> чел.",
         reply_markup=queue_settings_keyboard(
             queue_id, _as_bool(q["notify_leave_public"]),
             q["remind_timeout_min"], _as_bool(q["auto_kick"])
@@ -909,7 +918,8 @@ async def cb_toggle_leave(call: CallbackQuery):
     await safe_edit_reply_markup(call.message,
         reply_markup=queue_settings_keyboard(queue_id, _as_bool(q["notify_leave_public"]),
                                              q["remind_timeout_min"], _as_bool(q["auto_kick"])))
-    await call.answer("Анонсы выхода " + ("включены." if new else "выключены."))
+    status = "✅ включены" if new else "❌ выключены"
+    await call.answer(f"Анонсы выхода {status}.")
 
 @router.callback_query(F.data.startswith("toggle_autokick:"))
 async def cb_toggle_autokick(call: CallbackQuery):
@@ -924,7 +934,8 @@ async def cb_toggle_autokick(call: CallbackQuery):
     await safe_edit_reply_markup(call.message,
         reply_markup=queue_settings_keyboard(queue_id, _as_bool(q["notify_leave_public"]),
                                              q["remind_timeout_min"], _as_bool(q["auto_kick"])))
-    await call.answer("Авто-кик " + ("включён." if new else "выключен."))
+    status = "✅ включён" if new else "❌ выключен"
+    await call.answer(f"Авто-кик {status}.")
 
 @router.callback_query(F.data.startswith("set_remind:"))
 async def cb_set_remind(call: CallbackQuery, state: FSMContext):

@@ -6,10 +6,20 @@
 - Отправляет уведомления в чат
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import db
 import schedule_db as sdb
+
+
+def _now() -> datetime:
+    """Текущее время с учётом TZ_OFFSET — чтобы совпадало с реальным временем пользователя."""
+    try:
+        from config import TZ_OFFSET
+        offset = timedelta(hours=TZ_OFFSET)
+    except Exception:
+        offset = timedelta(0)
+    return datetime.now(timezone.utc) + offset
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +89,7 @@ def get_effective_lessons(lessons: list[dict], overrides: list[dict],
 
 async def process_schedule_tick(bot):
     """Запускается каждую минуту. Создаёт и закрывает очереди по расписанию."""
-    now = datetime.now()
+    now = _now()  # учитываем TZ_OFFSET
     today = now.strftime("%Y-%m-%d")
     current_time = now.strftime("%H:%M")
     weekday = now.isoweekday()
@@ -98,6 +108,9 @@ async def process_schedule_tick(bot):
 
         overrides = await sdb.get_overrides_for_date(group_id, today)
         effective = get_effective_lessons(lessons, overrides, today)
+
+        # Фильтруем по типу недели (чётная/нечётная) и убираем мероприятия
+        effective = sdb.filter_by_week_type(effective)
 
         for lesson in effective:
             # Пропускаем занятия с флагом skip_queue
@@ -177,19 +190,42 @@ async def _open_lesson_queue(bot, group: dict, lesson: dict,
     await sdb.update_event_queue(event_id, queue_id)
     await sdb.update_event_status(event_id, "active")
 
-    try:
-        await bot.send_message(
-            chat_id,
-            f"🔔 <b>Начинается пара {lesson_num}!</b>\n\n"
-            f"📚 <b>{subject}</b>\n"
-            f"⏰ {time_start}–{time_end}"
-            + (f"\n👤 {teacher}" if teacher else "")
-            + (f"\n🏫 Ауд. {room}" if room else "")
-            + f"\n\nОчередь открыта — запишитесь через /queue",
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        logger.error(f"Cannot notify group {chat_id}: {e}")
+    # Отправляем уведомление о начале пары, если это разрешено в настройках
+    settings = await sdb.get_chat_schedule_settings(chat_id)
+    if settings.get("notify_on_open", 1):
+        try:
+            week_type = sdb.get_current_week_type()
+            week_label = " (нечётная неделя)" if week_type == 1 else " (чётная неделя)" if week_type == 2 else ""
+            await bot.send_message(
+                chat_id,
+                f"🔔 <b>Начинается пара {lesson_num}!</b>{week_label}\n\n"
+                f"📚 <b>{subject}</b>\n"
+                f"⏰ {time_start}–{time_end}"
+                + (f"\n👤 {teacher}" if teacher else "")
+                + (f"\n🏫 Ауд. {room}" if room else "")
+                + f"\n\nОчередь открыта — запишитесь через /queue",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error(f"Cannot notify group {chat_id}: {e}")
+
+    # Предупреждение заранее о следующей паре (notify_before_min)
+    before_min = settings.get("notify_before_min", 0)
+    if before_min > 0:
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            start_dt = _dt.strptime(f"{date_str} {time_start}", "%Y-%m-%d %H:%M")
+            warn_dt = start_dt - _td(minutes=before_min)
+            if _now().strftime("%H:%M") == warn_dt.strftime("%H:%M"):
+                await bot.send_message(
+                    chat_id,
+                    f"⏰ <b>Через {before_min} мин — пара {lesson_num}</b>\n"
+                    f"📚 {subject}"
+                    + (f"\n🏫 Ауд. {room}" if room else ""),
+                    parse_mode="HTML",
+                )
+        except Exception as e:
+            logger.debug(f"Before-notify error: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -210,15 +246,18 @@ async def _close_lesson_queue(bot, group: dict, lesson: dict,
 
             await sdb.update_event_status(event["id"], "closed")
 
-            try:
-                await bot.send_message(
-                    chat_id,
-                    f"✅ <b>Пара {lesson_num} завершена.</b>\n"
-                    f"📚 {subject} — очередь закрыта.",
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.error(f"Cannot notify group {chat_id}: {e}")
+            # Проверяем настройки перед отправкой уведомления о конце пары
+            settings = await sdb.get_chat_schedule_settings(chat_id)
+            if settings.get("notify_on_close", 1):
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        f"✅ <b>Пара {lesson_num} завершена.</b>\n"
+                        f"📚 {subject} — очередь закрыта.",
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.error(f"Cannot notify group {chat_id}: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -227,8 +266,8 @@ async def _close_lesson_queue(bot, group: dict, lesson: dict,
 
 async def get_today_schedule(group_id: int) -> list[dict]:
     """Расписание на сегодня с учётом переопределений."""
-    weekday = datetime.now().isoweekday()
-    today = datetime.now().strftime("%Y-%m-%d")
+    weekday = _now().isoweekday()
+    today = _now().strftime("%Y-%m-%d")
 
     lessons = await sdb.get_lessons_for_day(group_id, weekday)
     overrides = await sdb.get_overrides_for_date(group_id, today)

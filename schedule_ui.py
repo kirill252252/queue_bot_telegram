@@ -9,12 +9,19 @@ def schedule_main_keyboard(chat_id: int):
             InlineKeyboardButton(text="📅 Сегодня",    callback_data="sched_today"),
         ],
         [
-            InlineKeyboardButton(text="✏️ Редактировать",      callback_data=f"sched_edit:{chat_id}"),
-            InlineKeyboardButton(text="📋 Изменить на дату",   callback_data=f"sched_override:{chat_id}"),
+            InlineKeyboardButton(text="1️⃣ Нечётная",   callback_data="sched_show_odd"),
+            InlineKeyboardButton(text="2️⃣ Чётная",     callback_data="sched_show_even"),
         ],
         [
-            InlineKeyboardButton(text="🔔 Звонки",             callback_data=f"sched_bells:{chat_id}"),
-            InlineKeyboardButton(text="🔕 Настройка очередей", callback_data=f"schedule_skip:{chat_id}"),
+            InlineKeyboardButton(text="✏️ Редактировать",    callback_data=f"sched_edit:{chat_id}"),
+            InlineKeyboardButton(text="📋 Изменить на дату", callback_data=f"sched_override:{chat_id}"),
         ],
-        [InlineKeyboardButton(text="📡 Источники",             callback_data=f"schedule_sources:{chat_id}")],
+        [
+            InlineKeyboardButton(text="🔔 Звонки",           callback_data=f"sched_bells:{chat_id}"),
+            InlineKeyboardButton(text="🔕 Очереди",          callback_data=f"schedule_skip:{chat_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="📣 Уведомления",      callback_data=f"sched_notify:{chat_id}"),
+            InlineKeyboardButton(text="📡 Источники",        callback_data=f"schedule_sources:{chat_id}"),
+        ],
     ])
