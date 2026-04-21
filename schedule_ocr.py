@@ -31,6 +31,7 @@ VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-
 
 # Модель для текстовых задач (быстрее и дешевле)
 TEXT_MODEL = os.getenv("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile")
+OCR_DEBUG = os.getenv("SCHEDULE_OCR_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ─────────────────────────────────────────────
@@ -186,6 +187,76 @@ SCHEDULE_REVIEW_PROMPT_TEMPLATE = """
 """
 
 
+SCHEDULE_CELL_PROMPT = """
+Ты анализируешь расписание занятий с изображения.
+
+Сначала определи ЯЧЕЙКИ по видимому номеру пары в колонке «лента», а не плоский список предметов.
+
+Главные правила:
+1. Если у двух соседних строк разные цифры в колонке «лента», это две разные пары, даже если текст одинаковый.
+2. Если под одной и той же цифрой внутри ячейки две строки, это одна пара с разделением по неделям.
+3. Верхняя строка под одним номером пары = нечётная неделя.
+4. Нижняя строка под одним номером пары = чётная неделя.
+5. Пустой верх + заполненный низ = только чётная неделя.
+6. Заполненный верх + пустой низ = только нечётная неделя.
+7. Мероприятия «Разговоры о важном» / «Внеклассное мероприятие» не считаются обычной парой: lesson_num=0, is_event=1.
+
+Критичные примеры:
+- Понедельник:
+  lesson_num 1 = обычная пара.
+  lesson_num 2 = одна ячейка с двумя строками:
+    верх = «Инструментальные средства разработки программного обеспечения»
+    низ  = «Программирование web-приложений»
+  Это ОДИН lesson_num=2, а не пары 2 и 3.
+- Вторник:
+  lesson_num 1 и lesson_num 2 могут иметь одинаковый текст.
+  Если цифры слева разные, это две разные пары.
+- Среда:
+  lesson_num 1 = only even
+  lesson_num 2 = odd/even split
+  lesson_num 3 = обычная отдельная пара, даже если текст похож на верх lesson_num 2
+  lesson_num 5 = only odd
+
+Верни только JSON:
+{
+  "groups": [
+    {
+      "group_name": "П-5-24",
+      "cells": [
+        {
+          "weekday": 1,
+          "lesson_num": 2,
+          "week_mode": "odd_even",
+          "is_event": 0,
+          "top": {
+            "subject": "Инструментальные средства разработки программного обеспечения",
+            "teacher": "Наприенко ЕМ",
+            "room": "509"
+          },
+          "bottom": {
+            "subject": "Программирование web-приложений",
+            "teacher": "Вахитов РГ",
+            "room": "410"
+          }
+        }
+      ]
+    }
+  ]
+}
+
+Допустимые week_mode:
+- "every_week"
+- "odd_even"
+- "odd_only"
+- "even_only"
+- "event"
+- "empty"
+
+Если top или bottom отсутствует, ставь null.
+Если не удалось распознать -> {"error":"не удалось распознать"}
+"""
+
+
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -220,6 +291,11 @@ def _groq_headers() -> dict:
     }
 
 
+def _debug_dump_schedule(stage: str, payload: Optional[dict]) -> None:
+    if OCR_DEBUG and isinstance(payload, dict):
+        logger.info("schedule_ocr %s: %s", stage, json.dumps(payload, ensure_ascii=False))
+
+
 EVENT_KEYWORDS = (
     "разговор о важном",
     "разговоры о важном",
@@ -227,6 +303,144 @@ EVENT_KEYWORDS = (
     "классный час",
     "воспитательное",
 )
+
+
+VALID_WEEK_MODES = {
+    "every_week",
+    "odd_even",
+    "odd_only",
+    "even_only",
+    "event",
+    "empty",
+}
+
+
+def _is_placeholder_text(value: Optional[str]) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return True
+    if text in {"-", "--", "---", "----", "-----", "------", "--------", "----------", "нет", "лента нет", "ленты нет"}:
+        return True
+    return bool(re.fullmatch(r"[-—–_\s.]+", text))
+
+
+def _normalize_cell_part(raw_part: Optional[dict]) -> Optional[dict]:
+    if not isinstance(raw_part, dict):
+        return None
+
+    subject = str(raw_part.get("subject") or "").strip()
+    teacher = str(raw_part.get("teacher") or "").strip()
+    room = str(raw_part.get("room") or "").strip()
+
+    if _is_placeholder_text(subject):
+        return None
+
+    return {
+        "subject": subject,
+        "teacher": teacher or None,
+        "room": room or None,
+    }
+
+
+def _make_lesson_from_part(
+    weekday: int,
+    lesson_num: int,
+    part: dict,
+    week_type: int,
+    is_event: int,
+) -> dict:
+    return {
+        "weekday": weekday,
+        "lesson_num": lesson_num,
+        "subject": part["subject"],
+        "teacher": part.get("teacher"),
+        "room": part.get("room"),
+        "time_start": "",
+        "time_end": "",
+        "week_type": week_type,
+        "is_event": is_event,
+    }
+
+
+def _expand_schedule_cells(result: dict) -> Optional[dict]:
+    """
+    Разворачиваем OCR-ответ в виде ячеек по номеру пары в список lessons.
+    """
+    if not result or not isinstance(result, dict):
+        return None
+    if "error" in result:
+        return None
+
+    groups = result.get("groups")
+    if not isinstance(groups, list):
+        return None
+
+    expanded_groups = []
+    for group in groups:
+        if not isinstance(group, dict) or "cells" not in group:
+            continue
+
+        lessons = []
+        for raw_cell in group.get("cells", []):
+            if not isinstance(raw_cell, dict):
+                continue
+
+            try:
+                weekday = int(raw_cell.get("weekday"))
+                lesson_num = int(raw_cell.get("lesson_num") or 0)
+            except (TypeError, ValueError):
+                continue
+
+            week_mode = str(raw_cell.get("week_mode") or "").strip().lower()
+            if week_mode and week_mode not in VALID_WEEK_MODES:
+                week_mode = ""
+
+            is_event = 1 if int(raw_cell.get("is_event") or 0) else 0
+            top = _normalize_cell_part(raw_cell.get("top"))
+            bottom = _normalize_cell_part(raw_cell.get("bottom"))
+
+            if week_mode == "empty":
+                continue
+
+            if is_event or week_mode == "event":
+                part = top or bottom
+                if part:
+                    lessons.append(_make_lesson_from_part(weekday, 0, part, 0, 1))
+                continue
+
+            if not week_mode:
+                if top and bottom:
+                    week_mode = "odd_even"
+                elif top and not bottom:
+                    week_mode = "every_week"
+                elif bottom and not top:
+                    week_mode = "even_only"
+                else:
+                    continue
+
+            if week_mode == "every_week":
+                part = top or bottom
+                if part:
+                    lessons.append(_make_lesson_from_part(weekday, lesson_num, part, 0, 0))
+            elif week_mode == "odd_even":
+                if top:
+                    lessons.append(_make_lesson_from_part(weekday, lesson_num, top, 1, 0))
+                if bottom:
+                    lessons.append(_make_lesson_from_part(weekday, lesson_num, bottom, 2, 0))
+            elif week_mode == "odd_only":
+                if top:
+                    lessons.append(_make_lesson_from_part(weekday, lesson_num, top, 1, 0))
+            elif week_mode == "even_only":
+                if bottom:
+                    lessons.append(_make_lesson_from_part(weekday, lesson_num, bottom, 2, 0))
+
+        if lessons:
+            expanded_groups.append({
+                "group_name": group.get("group_name") or "Р“СЂСѓРїРїР°",
+                "lessons": lessons,
+            })
+
+    return {"groups": expanded_groups} if expanded_groups else None
 
 
 def _normalize_lessons(raw_lessons: list) -> list[dict]:
@@ -541,12 +755,28 @@ async def parse_schedule_image(
     Возвращает: {"groups": [{"group_name": ..., "lessons": [...]}, ...]}
     Для обратной совместимости также поддерживает старый формат {"group_name": ..., "lessons": [...]}.
     """
+    cell_result = await _call_groq_vision(
+        prompt=SCHEDULE_CELL_PROMPT,
+        image_bytes=image_bytes,
+        media_type=media_type,
+        max_tokens=8192,
+    )
+    _debug_dump_schedule("cell_result", cell_result)
+    expanded_cells = _expand_schedule_cells(cell_result)
+    _debug_dump_schedule("expanded_cells", expanded_cells)
+    if expanded_cells:
+        normalized_cells = _normalize_schedule_result(expanded_cells)
+        _debug_dump_schedule("normalized_cells", normalized_cells)
+        if normalized_cells:
+            return normalized_cells
+
     initial_result = await _call_groq_vision(
         prompt=SCHEDULE_PROMPT,
         image_bytes=image_bytes,
         media_type=media_type,
         max_tokens=8192,
     )
+    _debug_dump_schedule("initial_result", initial_result)
 
     if not initial_result or not isinstance(initial_result, dict):
         return None
@@ -557,10 +787,12 @@ async def parse_schedule_image(
         media_type=media_type,
         draft_result=initial_result,
     )
+    _debug_dump_schedule("reviewed_result", reviewed_result)
     if reviewed_result:
         result = reviewed_result
 
     normalized = _normalize_schedule_result(result)
+    _debug_dump_schedule("normalized_result", normalized)
     if normalized:
         return normalized
 

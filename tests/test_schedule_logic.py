@@ -135,6 +135,89 @@ class OcrPostProcessTests(unittest.TestCase):
         repaired = schedule_ocr._repair_group_lessons(lessons)
         self.assertEqual([lesson["lesson_num"] for lesson in repaired], [1, 3])
 
+    def test_expand_schedule_cells_preserves_split_and_duplicate_numbers(self):
+        parsed = {
+            "groups": [{
+                "group_name": "П-5-24",
+                "cells": [
+                    {
+                        "weekday": 1,
+                        "lesson_num": 1,
+                        "week_mode": "every_week",
+                        "is_event": 0,
+                        "top": {
+                            "subject": "Инструментальные средства разработки программного обеспечения",
+                            "teacher": "Наприенко ЕМ",
+                            "room": "509",
+                        },
+                        "bottom": None,
+                    },
+                    {
+                        "weekday": 1,
+                        "lesson_num": 2,
+                        "week_mode": "odd_even",
+                        "is_event": 0,
+                        "top": {
+                            "subject": "Инструментальные средства разработки программного обеспечения",
+                            "teacher": "Наприенко ЕМ",
+                            "room": "509",
+                        },
+                        "bottom": {
+                            "subject": "Программирование web-приложений",
+                            "teacher": "Вахитов РГ",
+                            "room": "410",
+                        },
+                    },
+                    {
+                        "weekday": 3,
+                        "lesson_num": 1,
+                        "week_mode": "even_only",
+                        "is_event": 0,
+                        "top": None,
+                        "bottom": {
+                            "subject": "Математическое моделирование",
+                            "teacher": "Мережникова ЕМ",
+                            "room": "404",
+                        },
+                    },
+                    {
+                        "weekday": 3,
+                        "lesson_num": 5,
+                        "week_mode": "odd_only",
+                        "is_event": 0,
+                        "top": {
+                            "subject": "Иностранный язык в профессиональной деятельности",
+                            "teacher": "Данилова АА",
+                            "room": "Л610",
+                        },
+                        "bottom": None,
+                    },
+                ],
+            }]
+        }
+
+        expanded = schedule_ocr._expand_schedule_cells(parsed)
+        lessons = expanded["groups"][0]["lessons"]
+
+        monday = [(lesson["lesson_num"], lesson["subject"], lesson["week_type"]) for lesson in lessons if lesson["weekday"] == 1]
+        wednesday = [(lesson["lesson_num"], lesson["subject"], lesson["week_type"]) for lesson in lessons if lesson["weekday"] == 3]
+
+        self.assertEqual(
+            monday,
+            [
+                (1, "Инструментальные средства разработки программного обеспечения", 0),
+                (2, "Инструментальные средства разработки программного обеспечения", 1),
+                (2, "Программирование web-приложений", 2),
+            ],
+        )
+        self.assertEqual(
+            wednesday,
+            [
+                (1, "Математическое моделирование", 2),
+                (5, "Иностранный язык в профессиональной деятельности", 1),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
