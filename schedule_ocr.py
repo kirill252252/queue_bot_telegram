@@ -9,9 +9,12 @@ import json
 import logging
 import re
 import os
+from io import BytesIO
 from typing import Optional
 
 import aiohttp
+import numpy as np
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +260,41 @@ SCHEDULE_CELL_PROMPT = """
 """
 
 
+SCHEDULE_DAY_PROMPT_TEMPLATE = """
+Ты видишь только один день расписания для одной группы: {day_name}.
+В этом фрагменте слева есть видимые номера пар, рядом аудитории, справа содержимое ячеек.
+
+Правила:
+1. Если цифры слева разные, это разные пары, даже если текст одинаковый.
+2. Если под одной цифрой внутри одной ячейки две строки, это одна пара с делением по неделям:
+   - верх = week_mode "odd_even" верхняя часть
+   - низ  = week_mode "odd_even" нижняя часть
+3. Верх заполнен, низ пустой/прочерк -> "odd_only"
+4. Верх пустой/прочерк, низ заполнен -> "even_only"
+5. Одна обычная строка -> "every_week"
+6. Внеклассное мероприятие / Разговоры о важном -> lesson_num 0, week_mode "event", is_event 1
+7. Не объединяй одинаковые пары с разными цифрами.
+
+Верни только JSON:
+{{
+  "weekday": {weekday},
+  "cells": [
+    {{
+      "lesson_num": 2,
+      "week_mode": "odd_even",
+      "is_event": 0,
+      "top": {{"subject": "...", "teacher": "...", "room": "..."}},
+      "bottom": {{"subject": "...", "teacher": "...", "room": "..."}}
+    }}
+  ]
+}}
+
+Если ячейка пустая, не включай её.
+Если top или bottom отсутствует, ставь null.
+Если не удалось распознать, верни {{"weekday": {weekday}, "cells": []}}.
+"""
+
+
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -294,6 +332,171 @@ def _groq_headers() -> dict:
 def _debug_dump_schedule(stage: str, payload: Optional[dict]) -> None:
     if OCR_DEBUG and isinstance(payload, dict):
         logger.info("schedule_ocr %s: %s", stage, json.dumps(payload, ensure_ascii=False))
+
+
+DAY_NAMES = {
+    1: "Понедельник",
+    2: "Вторник",
+    3: "Среда",
+    4: "Четверг",
+    5: "Пятница",
+    6: "Суббота",
+    7: "Воскресенье",
+}
+
+
+def _group_positions(positions: list[int], max_gap: int = 1) -> list[list[int]]:
+    if not positions:
+        return []
+
+    grouped = [[positions[0]]]
+    for value in positions[1:]:
+        if value - grouped[-1][-1] <= max_gap:
+            grouped[-1].append(value)
+        else:
+            grouped.append([value])
+    return grouped
+
+
+def _group_centers(positions: list[int], max_gap: int = 1) -> list[int]:
+    return [int(round(sum(group) / len(group))) for group in _group_positions(sorted(positions), max_gap=max_gap)]
+
+
+def _max_dark_run(values: np.ndarray) -> int:
+    best = 0
+    current = 0
+    for flag in values:
+        if flag:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def _detect_day_bands(image_bytes: bytes) -> list[tuple[int, int, int]]:
+    """
+    Пытаемся найти полосы дней в типовом расписании колледжа по горизонтальным линиям таблицы.
+    Возвращает список кортежей: (weekday, top, bottom).
+    """
+    image = Image.open(BytesIO(image_bytes)).convert("L")
+    arr = np.array(image)
+    height, width = arr.shape
+    threshold = min(175, max(110, int(arr.mean() * 0.82)))
+    dark = arr < threshold
+
+    row_runs = [_max_dark_run(row) for row in dark]
+    line_rows = [idx for idx, run in enumerate(row_runs) if run >= max(120, int(width * 0.22))]
+    row_centers = [value for value in _group_centers(line_rows, max_gap=2) if value > 40]
+
+    if len(row_centers) < 12:
+        return []
+
+    clusters = _group_positions(row_centers, max_gap=40)
+    if len(clusters) < 5:
+        return []
+
+    clusters = clusters[:5]
+    day_bands = []
+    day_start = clusters[0][0]
+    for weekday, cluster in enumerate(clusters, start=1):
+        day_end = cluster[-1]
+        day_bands.append((weekday, day_start, day_end))
+        day_start = day_end
+
+    return day_bands
+
+
+def _detect_content_bounds(image_bytes: bytes) -> Optional[tuple[int, int]]:
+    """
+    Ищем вертикальные границы: после колонки с днями и до правой границы таблицы.
+    """
+    image = Image.open(BytesIO(image_bytes)).convert("L")
+    arr = np.array(image)
+    height, _width = arr.shape
+    threshold = min(175, max(110, int(arr.mean() * 0.82)))
+    dark = arr < threshold
+
+    col_runs = [_max_dark_run(col) for col in dark.T]
+    line_cols = [idx for idx, run in enumerate(col_runs) if run >= max(140, int(height * 0.12))]
+    col_centers = _group_centers(line_cols, max_gap=2)
+
+    if len(col_centers) < 4:
+        return None
+
+    left = max(0, col_centers[1] - 2)
+    right = col_centers[-1]
+    if right - left < 150:
+        return None
+    return left, right
+
+
+def _crop_image_bytes(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes:
+    image = Image.open(BytesIO(image_bytes))
+    cropped = image.crop(box)
+    output = BytesIO()
+    cropped.save(output, format="PNG")
+    return output.getvalue()
+
+
+async def _parse_schedule_by_day_crops(
+    image_bytes: bytes,
+    media_type: str,
+    group_name: str,
+) -> Optional[dict]:
+    day_bands = _detect_day_bands(image_bytes)
+    content_bounds = _detect_content_bounds(image_bytes)
+
+    if len(day_bands) < 5 or not content_bounds:
+        return None
+
+    left, right = content_bounds
+    parsed_lessons = []
+
+    for weekday, top, bottom in day_bands:
+        crop_bytes = _crop_image_bytes(image_bytes, (left, top, right, bottom))
+        prompt = SCHEDULE_DAY_PROMPT_TEMPLATE.format(
+            day_name=DAY_NAMES.get(weekday, str(weekday)),
+            weekday=weekday,
+        )
+        day_result = await _call_groq_vision(
+            prompt=prompt,
+            image_bytes=crop_bytes,
+            media_type="image/png",
+            max_tokens=2048,
+        )
+        _debug_dump_schedule(f"day_crop_{weekday}", day_result)
+        if not isinstance(day_result, dict):
+            continue
+
+        cells_payload = {
+            "groups": [{
+                "group_name": group_name or "Группа",
+                "cells": [
+                    {
+                        **cell,
+                        "weekday": weekday,
+                    }
+                    for cell in day_result.get("cells", [])
+                    if isinstance(cell, dict)
+                ],
+            }]
+        }
+        expanded = _expand_schedule_cells(cells_payload)
+        if not expanded:
+            continue
+        group_lessons = expanded["groups"][0].get("lessons", [])
+        parsed_lessons.extend(group_lessons)
+
+    if not parsed_lessons:
+        return None
+
+    return {
+        "groups": [{
+            "group_name": group_name or "Группа",
+            "lessons": parsed_lessons,
+        }]
+    }
 
 
 EVENT_KEYWORDS = (
@@ -443,9 +646,29 @@ def _expand_schedule_cells(result: dict) -> Optional[dict]:
     return {"groups": expanded_groups} if expanded_groups else None
 
 
+def _schedule_candidate_score(result: Optional[dict]) -> int:
+    if not result or not isinstance(result, dict):
+        return -1
+
+    groups = result.get("groups", [])
+    lessons = []
+    weekdays = set()
+    for group in groups:
+        for lesson in group.get("lessons", []):
+            lessons.append(lesson)
+            weekdays.add(int(lesson.get("weekday") or 0))
+
+    score = len(lessons) * 10 + len(weekdays) * 20
+    split_pairs = sum(1 for lesson in lessons if int(lesson.get("week_type") or 0) in (1, 2))
+    every_week = sum(1 for lesson in lessons if int(lesson.get("week_type") or 0) == 0)
+    score += split_pairs * 3 + every_week
+    return score
+
+
 def _normalize_lessons(raw_lessons: list) -> list[dict]:
     """
     Приводим уроки к единому виду после OCR.
+    Мероприятия (is_event) всегда получают lesson_num=0.
     """
     out = []
     for raw in raw_lessons:
@@ -456,7 +679,6 @@ def _normalize_lessons(raw_lessons: list) -> list[dict]:
 
         try:
             lesson["weekday"] = int(lesson.get("weekday"))
-            lesson["lesson_num"] = int(lesson.get("lesson_num") or 0)
         except (TypeError, ValueError):
             continue
 
@@ -464,6 +686,27 @@ def _normalize_lessons(raw_lessons: list) -> list[dict]:
         if not subject:
             continue
         lesson["subject"] = subject
+
+        # Определяем is_event ДО установки lesson_num
+        try:
+            lesson["is_event"] = int(lesson.get("is_event") or 0)
+        except (ValueError, TypeError):
+            lesson["is_event"] = 0
+
+        # Автоопределение мероприятий по ключевым словам
+        if any(keyword in subject.lower() for keyword in EVENT_KEYWORDS):
+            lesson["is_event"] = 1
+
+        # lesson_num: мероприятия = 0, остальные = как есть
+        try:
+            raw_num = int(lesson.get("lesson_num") or 0)
+        except (TypeError, ValueError):
+            raw_num = 0
+
+        if lesson["is_event"]:
+            lesson["lesson_num"] = 0
+        else:
+            lesson["lesson_num"] = raw_num
 
         lesson["teacher"] = str(lesson.get("teacher") or "").strip() or None
         lesson["room"] = str(lesson.get("room") or "").strip() or None
@@ -474,14 +717,6 @@ def _normalize_lessons(raw_lessons: list) -> list[dict]:
             lesson["week_type"] = int(lesson.get("week_type") or 0)
         except (ValueError, TypeError):
             lesson["week_type"] = 0
-
-        try:
-            lesson["is_event"] = int(lesson.get("is_event") or 0)
-        except (ValueError, TypeError):
-            lesson["is_event"] = 0
-
-        if any(keyword in subject.lower() for keyword in EVENT_KEYWORDS):
-            lesson["is_event"] = 1
 
         out.append(lesson)
 
@@ -523,9 +758,11 @@ def _dedupe_lessons(lessons: list[dict]) -> list[dict]:
 
 def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
     """
-    Локальная защита от самых частых OCR-ошибок:
-    - мероприятие не считается парой и не должно сдвигать обычные lesson_num
-    - точные дубли одной и той же записи схлопываем
+    Улучшенная пост-обработка OCR-результата:
+    - мероприятия (is_event) → lesson_num=0, не влияют на нумерацию
+    - consecutive дубли с одинаковыми lesson_num + content + week_type → схлопываем
+    - сдвиг lesson_num назад ТОЛЬКО если мероприятие явно сдвинуло нумерацию
+    - сохраняем исходную нумерацию regular-занятий (пропуски допустимы)
     """
     by_day: dict[int, list[dict]] = {}
     for lesson in lessons:
@@ -537,6 +774,7 @@ def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
         events = []
         regular = []
 
+        # 1. Разделяем мероприятия и обычные занятия
         for lesson in day_lessons:
             if int(lesson.get("is_event") or 0):
                 event_lesson = dict(lesson)
@@ -545,26 +783,45 @@ def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
             else:
                 regular.append(dict(lesson))
 
+        # 2. Удаляем consecutive дубли внутри regular (одинаковый lesson_num + content + week_type)
+        deduped_regular = []
+        prev_key = None
+        for lesson in sorted(regular, key=lambda x: (
+            int(x.get("lesson_num") or 0),
+            int(x.get("week_type") or 0),
+            str(x.get("subject") or ""),
+        )):
+            key = (
+                int(lesson.get("lesson_num") or 0),
+                int(lesson.get("week_type") or 0),
+                str(lesson.get("subject") or ""),
+                str(lesson.get("teacher") or ""),
+                str(lesson.get("room") or ""),
+            )
+            if key != prev_key:
+                deduped_regular.append(lesson)
+                prev_key = key
+
+        # 3. Сдвиг lesson_num: только если мероприятие явно сдвинуло нумерацию
+        # Т.е.: есть events И первая regular пара имеет номер > 1 И lesson_num=1 отсутствует
         regular_numbers = sorted(
             {
                 int(lesson.get("lesson_num") or 0)
-                for lesson in regular
+                for lesson in deduped_regular
                 if int(lesson.get("lesson_num") or 0) > 0
             }
         )
 
-        # Если OCR посчитал мероприятие "нулевой" парой как первую ленту,
-        # сдвигаем обычные занятия обратно.
         if events and regular_numbers and regular_numbers[0] > 1 and 1 not in regular_numbers:
-            shifted_regular = []
-            for lesson in regular:
-                shifted = dict(lesson)
-                shifted["lesson_num"] = max(1, int(shifted.get("lesson_num") or 0) - 1)
-                shifted_regular.append(shifted)
-            regular = shifted_regular
+            # Мероприятие сдвинуло нумерацию → сдвигаем regular на -1
+            for lesson in deduped_regular:
+                old_num = int(lesson.get("lesson_num") or 0)
+                if old_num > 0:
+                    lesson["lesson_num"] = old_num - 1
 
+        # 4. Собираем результат
         repaired.extend(events)
-        repaired.extend(regular)
+        repaired.extend(deduped_regular)
 
     return _dedupe_lessons(repaired)
 
@@ -764,11 +1021,33 @@ async def parse_schedule_image(
     _debug_dump_schedule("cell_result", cell_result)
     expanded_cells = _expand_schedule_cells(cell_result)
     _debug_dump_schedule("expanded_cells", expanded_cells)
+    normalized_cells = None
     if expanded_cells:
         normalized_cells = _normalize_schedule_result(expanded_cells)
         _debug_dump_schedule("normalized_cells", normalized_cells)
-        if normalized_cells:
-            return normalized_cells
+
+    crop_group_name = "Группа"
+    if isinstance(cell_result, dict):
+        try:
+            crop_group_name = (
+                cell_result.get("groups", [{}])[0].get("group_name")
+                or crop_group_name
+            )
+        except Exception:
+            pass
+
+    day_crop_result = await _parse_schedule_by_day_crops(
+        image_bytes=image_bytes,
+        media_type=media_type,
+        group_name=crop_group_name,
+    )
+    _debug_dump_schedule("day_crop_result", day_crop_result)
+    normalized_day_crop = _normalize_schedule_result(day_crop_result) if day_crop_result else None
+    _debug_dump_schedule("normalized_day_crop", normalized_day_crop)
+
+    best_candidate = normalized_cells
+    if _schedule_candidate_score(normalized_day_crop) > _schedule_candidate_score(best_candidate):
+        best_candidate = normalized_day_crop
 
     initial_result = await _call_groq_vision(
         prompt=SCHEDULE_PROMPT,
@@ -779,7 +1058,7 @@ async def parse_schedule_image(
     _debug_dump_schedule("initial_result", initial_result)
 
     if not initial_result or not isinstance(initial_result, dict):
-        return None
+        return best_candidate
 
     result = initial_result
     reviewed_result = await _review_schedule_parse(
@@ -793,10 +1072,14 @@ async def parse_schedule_image(
 
     normalized = _normalize_schedule_result(result)
     _debug_dump_schedule("normalized_result", normalized)
-    if normalized:
-        return normalized
+    if _schedule_candidate_score(normalized) > _schedule_candidate_score(best_candidate):
+        best_candidate = normalized
 
-    return _normalize_schedule_result(initial_result)
+    fallback_normalized = _normalize_schedule_result(initial_result)
+    if _schedule_candidate_score(fallback_normalized) > _schedule_candidate_score(best_candidate):
+        best_candidate = fallback_normalized
+
+    return best_candidate
 
 
 # ─────────────────────────────────────────────

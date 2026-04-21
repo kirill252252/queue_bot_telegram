@@ -1562,20 +1562,23 @@ async def _show_filtered_week(call: CallbackQuery, week_type: int):
 
         lines = [f"📅 <b>{group['group_name']} — {week_name}</b>"]
         for wd in sorted(week):
-            # Фильтруем только нужный тип + общие занятия
+            # Фильтруем: нужный тип недели + общие + мероприятия (is_event всегда показываем)
             day_lessons = [
                 l for l in week[wd]
-                if int(l.get("week_type") or 0) in (0, week_type)
-                and not l.get("is_event")
+                if (
+                    (l.get("is_event") and int(l.get("lesson_num", 0)) == 0)
+                    or int(l.get("week_type") or 0) in (0, week_type)
+                )
             ]
             if not day_lessons:
                 continue
             lines.append(f"\n<b>{DAYS_FULL.get(wd, wd)}</b>")
-            for l in sorted(day_lessons, key=lambda x: x.get("lesson_num", 0)):
+            for l in sorted(day_lessons, key=lambda x: (0 if x.get("is_event") else 1, x.get("lesson_num", 0))):
                 teacher = f" — {l['teacher']}" if l.get("teacher") else ""
                 room    = f" [{l['room']}]" if l.get("room") else ""
                 time_s  = _lesson_time_str(l, bells_cache)
-                lines.append(f"  {l['lesson_num']}.{time_s} <b>{l['subject']}</b>{teacher}{room}")
+                ev_s    = " 🎓" if l.get("is_event") else ""
+                lines.append(f"  {l['lesson_num']}.{time_s} <b>{l['subject']}</b>{teacher}{room}{ev_s}")
         parts.append("\n".join(lines))
 
     if not parts:

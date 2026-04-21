@@ -427,13 +427,13 @@ async def get_lessons_for_day(group_id: int, weekday: int) -> list[dict]:
             rows = await conn.fetch("""
                 SELECT * FROM schedule_lessons
                 WHERE group_id=$1 AND weekday=$2 AND is_active=1
-                ORDER BY time_start
+                ORDER BY lesson_num
             """, group_id, weekday)
             return [dict(r) for r in rows]
     return await _fetchall("""
         SELECT * FROM schedule_lessons
         WHERE group_id=? AND weekday=? AND is_active=1
-        ORDER BY time_start
+        ORDER BY lesson_num
     """, (group_id, weekday))
 
 
