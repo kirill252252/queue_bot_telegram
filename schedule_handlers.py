@@ -305,13 +305,34 @@ async def cb_show_week(call: CallbackQuery):
         lines = [f"📅 <b>Расписание — {group['group_name']}</b>"]
         for wd in sorted(week):
             lines.append(f"\n<b>{DAYS_FULL.get(wd, wd)}</b>")
-            for l in sorted(week[wd], key=lambda x: x.get("lesson_num", 0)):
-                teacher = f" — {l['teacher']}" if l.get("teacher") else ""
-                room    = f" [{l['room']}]" if l.get("room") else ""
-                time_s  = _lesson_time_str(l, bells_cache)
-                skip_s  = " 🔕" if l.get("skip_queue") else ""
-                week_s  = _lesson_week_icon(l)
-                lines.append(f"  {l['lesson_num']}.{time_s}{week_s} <b>{l['subject']}</b>{teacher}{room}{skip_s}")
+            # Группируем по lesson_num чтобы дроби (wt=1 и wt=2) показать вместе
+            from collections import defaultdict as _dd
+            by_num = _dd(list)
+            for l in sorted(week[wd], key=lambda x: (x.get("lesson_num", 0), int(x.get("week_type") or 0))):
+                by_num[l.get("lesson_num", 0)].append(l)
+            for num in sorted(by_num):
+                variants = by_num[num]
+                time_s = _lesson_time_str(variants[0], bells_cache)
+                if len(variants) == 1:
+                    l       = variants[0]
+                    teacher = f" — {l['teacher']}" if l.get("teacher") else ""
+                    room    = f" [{l['room']}]" if l.get("room") else ""
+                    skip_s  = " 🔕" if l.get("skip_queue") else ""
+                    ev_s    = " 🎓" if l.get("is_event") else ""
+                    wt      = int(l.get("week_type") or 0)
+                    # Пометка если пара только на одной неделе
+                    wlbl    = {1: " 1️⃣", 2: " 2️⃣"}.get(wt, "")
+                    lines.append(f"  {num}.{time_s}{wlbl} <b>{l['subject']}</b>{teacher}{room}{skip_s}{ev_s}")
+                else:
+                    # Дробная пара — показываем оба варианта
+                    lines.append(f"  {num}.{time_s}")
+                    for l in variants:
+                        teacher = f" — {l['teacher']}" if l.get("teacher") else ""
+                        room    = f" [{l['room']}]" if l.get("room") else ""
+                        skip_s  = " 🔕" if l.get("skip_queue") else ""
+                        wt      = int(l.get("week_type") or 0)
+                        icon    = {1: "1️⃣", 2: "2️⃣"}.get(wt, "📆")
+                        lines.append(f"      {icon} <b>{l['subject']}</b>{teacher}{room}{skip_s}")
         parts.append("\n".join(lines))
 
     if not parts:
@@ -1563,17 +1584,19 @@ async def _show_filtered_week(call: CallbackQuery, week_type: int):
         lines = [f"📅 <b>{group['group_name']} — {week_name}</b>"]
         for wd in sorted(week):
             # Фильтруем: нужный тип недели + общие + мероприятия (is_event всегда показываем)
+            # Фильтруем: мероприятия (всегда) + пары нужного типа недели
             day_lessons = [
                 l for l in week[wd]
                 if (
-                    (l.get("is_event") and int(l.get("lesson_num", 0)) == 0)
-                    or int(l.get("week_type") or 0) in (0, week_type)
+                    l.get("is_event")                               # мероприятия показываем всегда
+                    or int(l.get("week_type") or 0) in (0, week_type)  # пары этой недели + общие
                 )
             ]
             if not day_lessons:
                 continue
             lines.append(f"\n<b>{DAYS_FULL.get(wd, wd)}</b>")
-            for l in sorted(day_lessons, key=lambda x: (0 if x.get("is_event") else 1, x.get("lesson_num", 0))):
+            for l in sorted(day_lessons, key=lambda x: (0 if x.get("is_event") else 1,
+                                                         x.get("lesson_num", 0))):
                 teacher = f" — {l['teacher']}" if l.get("teacher") else ""
                 room    = f" [{l['room']}]" if l.get("room") else ""
                 time_s  = _lesson_time_str(l, bells_cache)
