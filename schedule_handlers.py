@@ -25,9 +25,15 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+from config import SOURCE_MONITOR_INTERVAL_MIN
 import db
 import schedule_db as sdb
-from schedule_ocr import parse_schedule_image, parse_change_image, format_schedule
+from schedule_group_match import build_group_lookup, resolve_target_groups
+from schedule_ocr import (
+    parse_schedule_image,
+    parse_schedule_change,
+    format_schedule,
+)
 from schedule_manager import get_today_schedule, get_week_schedule
 from schedule_ui import schedule_main_keyboard
 
@@ -313,7 +319,7 @@ async def cb_show_today(call: CallbackQuery):
         await call.answer("Расписание не загружено.", show_alert=True)
         return
 
-    wd       = datetime.now().isoweekday()
+    wd       = sdb.get_local_now().isoweekday()
     day_name = DAYS_FULL.get(wd, str(wd))
     bells_cache = {b["lesson_num"]: b for b in await sdb.get_bells(chat_id)}
 
@@ -361,28 +367,36 @@ async def _build_sources_keyboard(chat_id: int, sources: list[dict]) -> InlineKe
 
 @sched_router.callback_query(F.data.startswith("schedule_sources:"))
 async def cb_sources(call: CallbackQuery):
-    """Меню источников изменений расписания."""
+    """Sources menu for schedule change monitoring."""
     chat_id = int(call.data.split(":")[1])
 
     if not await _is_admin(call.bot, chat_id, call.from_user.id):
-        await call.answer("❌ Только администраторы.", show_alert=True)
+        await call.answer("Admins only.", show_alert=True)
         return
 
     sources = await sdb.get_chat_sources(chat_id)
     kb = await _build_sources_keyboard(chat_id, sources)
 
-    text = (
-        "📡 <b>Источники изменений расписания</b>\n\n"
-        + ("Бот мониторит эти каналы и автоматически применяет изменения:\n\n"
-           + "\n".join(f"• {'TG' if s['source_type'] == 'telegram' else 'VK'}: {s['source_id']}" for s in sources)
-           if sources else
-           "Источники ещё не добавлены.\n\n"
-           "Добавьте Telegram-канал или VK-группу — бот будет проверять их "
-           "каждые 15 минут и автоматически вносить изменения в расписание.")
-    )
+    if sources:
+        lines = "\n".join(
+            f"- {'TG' if s['source_type'] == 'telegram' else 'VK'}: {s['source_id']}"
+            for s in sources
+        )
+        text = (
+            "<b>Schedule Sources</b>\n\n"
+            "The bot watches these channels and applies changes automatically:\n\n"
+            f"{lines}"
+        )
+    else:
+        text = (
+            "<b>Schedule Sources</b>\n\n"
+            "No sources added yet.\n\n"
+            "Add a Telegram channel or VK group and the bot will check it every "
+            f"{SOURCE_MONITOR_INTERVAL_MIN} minutes."
+        )
+
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await call.answer()
-
 
 @sched_router.callback_query(F.data.startswith("sched_add_source:"))
 async def cb_add_source(call: CallbackQuery, state: FSMContext):
@@ -407,7 +421,7 @@ async def cb_add_source(call: CallbackQuery, state: FSMContext):
 
 @sched_router.message(ScheduleStates.waiting_source)
 async def fsm_receive_source(message: Message, state: FSMContext):
-    """Сохраняем источник мониторинга в БД."""
+    """Store one monitoring source."""
     data        = await state.get_data()
     chat_id     = data["chat_id"]
     source_type = data["source_type"]
@@ -415,21 +429,20 @@ async def fsm_receive_source(message: Message, state: FSMContext):
     await state.clear()
 
     if not source_id:
-        await message.answer("❌ Пустое значение. Попробуйте снова через /schedule.")
+        await message.answer("Empty value. Try again via /schedule.")
         return
 
     if source_type == "telegram":
-        source_id = "@" + source_id  # добавляем @ обратно для TG
+        source_id = "@" + source_id
 
     await sdb.add_source(chat_id, source_type, source_id)
     await message.answer(
-        f"✅ Источник добавлен!\n\n"
-        f"Тип: <b>{'Telegram' if source_type == 'telegram' else 'ВКонтакте'}</b>\n"
-        f"Канал/группа: <b>{source_id}</b>\n\n"
-        f"Бот будет проверять его каждые 15 минут.",
+        f"Source added.\n\n"
+        f"Type: <b>{'Telegram' if source_type == 'telegram' else 'VK'}</b>\n"
+        f"Channel/Group: <b>{source_id}</b>\n\n"
+        f"Check interval: every {SOURCE_MONITOR_INTERVAL_MIN} minutes.",
         parse_mode="HTML",
     )
-
 
 @sched_router.callback_query(F.data.startswith("sched_del_source:"))
 async def cb_del_source(call: CallbackQuery):
@@ -1024,7 +1037,7 @@ async def cb_override_group(call: CallbackQuery):
         await call.answer("❌ Только администраторы.", show_alert=True)
         return
 
-    today   = datetime.now()
+    today   = sdb.get_local_now()
     buttons = []
     for delta in range(7):
         day = today + timedelta(days=delta)
@@ -1389,21 +1402,14 @@ async def cb_bells_reset_confirm(call: CallbackQuery):
     F.photo,
 )
 async def on_group_photo(message: Message, state: FSMContext):
-    """
-    Если в группе кто-то отправил фото с подписью «изменения»/«отмена»/«расписание» —
-    пробуем распознать изменения и применить их автоматически.
-    Не срабатывает если FSM активна (например, идёт загрузка расписания).
-    """
-    # Пропускаем если уже идёт какой-то диалог (FSM активна)
+    """Try to parse schedule changes from a photo posted in the group."""
     if await state.get_state() is not None:
         return
 
-    # Пропускаем если расписание ещё не загружено в этот чат
     groups = await sdb.get_chat_groups(message.chat.id)
     if not groups:
         return
 
-    # Проверяем подпись фото на ключевые слова об изменениях
     caption = (message.caption or "").lower()
     if not any(k in caption for k in CHANGE_KEYWORDS):
         return
@@ -1413,38 +1419,39 @@ async def on_group_photo(message: Message, state: FSMContext):
     except Exception:
         return
 
-    # Отправляем в Groq Vision для распознавания изменений
-    result = await parse_change_image(image_bytes)
+    result = await parse_schedule_change(message.caption or "", image_bytes)
     if not result:
         return
 
-    changes      = result.get("changes") or []
-    fallback_date = result.get("date")  # дата из заголовка листа изменений
-
+    changes = result.get("changes") or []
+    fallback_date = result.get("date")
     if not changes:
         return
 
+    group_lookup = build_group_lookup(groups)
     applied = []
     for change in changes:
-        for group in groups:
+        targets = resolve_target_groups(change, groups, group_lookup)
+        if not targets:
+            if change.get("group"):
+                logger.warning("Schedule change skipped in group chat: unknown group %r", change.get("group"))
+            continue
+
+        for group in targets:
             await sdb.save_override(group["id"], change, fallback_date=fallback_date)
-        action  = change.get("action") or change.get("type") or "изменение"
+
+        action = change.get("action") or change.get("type") or "change"
         subject = change.get("subject") or "?"
-        grp_lbl = change.get("group") or "все группы"
-        applied.append(f"<b>{grp_lbl}</b> лента {change.get('lesson_num', '?')}: {action} — {subject}")
+        grp_lbl = change.get("group") or "all groups"
+        applied.append(f"<b>{grp_lbl}</b> lesson {change.get('lesson_num', '?')}: {action} - {subject}")
 
     if applied:
-        date_line = f"📅 Дата: {fallback_date}\n" if fallback_date else ""
+        date_line = f"Date: {fallback_date}\n" if fallback_date else ""
         await message.reply(
-            f"📢 <b>Изменения расписания применены:</b>\n{date_line}\n"
-            + "\n".join(f"• {a}" for a in applied),
+            f"<b>Schedule changes applied</b>\n{date_line}\n"
+            + "\n".join(f"- {a}" for a in applied),
             parse_mode="HTML",
         )
-
-
-# ═══════════════════════════════════════════════════════════════════
-# ПЕРЕКЛЮЧЕНИЕ ТИПА НЕДЕЛИ И ФЛАГА МЕРОПРИЯТИЯ
-# ═══════════════════════════════════════════════════════════════════
 
 @sched_router.callback_query(F.data.startswith("sched_toggle_week:"))
 async def cb_toggle_week_type(call: CallbackQuery):

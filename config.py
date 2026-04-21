@@ -51,6 +51,13 @@ if not GROQ_API_KEY:
 # Получить: https://vk.com/dev/access_token (user token или service token)
 VK_TOKEN = os.getenv("VK_TOKEN", "")
 
+# Source monitor cadence in minutes.
+SOURCE_MONITOR_INTERVAL_MIN = int(os.getenv("SOURCE_MONITOR_INTERVAL_MIN", "15"))
+
+# Academic week parity can be anchored to a known week start date.
+ACADEMIC_WEEK_REFERENCE_DATE = os.getenv("ACADEMIC_WEEK_REFERENCE_DATE", "").strip()
+ACADEMIC_WEEK_REFERENCE_TYPE = int(os.getenv("ACADEMIC_WEEK_REFERENCE_TYPE", "1"))
+
 # ── Уведомления ───────────────────────────────────────────────────────────────
 # За сколько мест до первого предупреждать участника
 NOTIFY_APPROACHING = int(os.getenv("NOTIFY_APPROACHING", "3"))

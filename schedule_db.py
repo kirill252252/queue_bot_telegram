@@ -4,10 +4,23 @@
 """
 import aiosqlite
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_LESSON_UPDATE_FIELDS = {
+    "subject",
+    "teacher",
+    "room",
+    "time_start",
+    "time_end",
+    "lesson_num",
+    "weekday",
+    "skip_queue",
+    "week_type",
+    "is_event",
+}
 
 
 def _get_db_type():
@@ -16,6 +29,37 @@ def _get_db_type():
         return DB_TYPE
     except Exception:
         return "sqlite"
+
+
+def _get_local_offset() -> timedelta:
+    try:
+        from config import TZ_OFFSET
+        return timedelta(hours=TZ_OFFSET)
+    except Exception:
+        return timedelta(0)
+
+
+def get_local_now() -> datetime:
+    return datetime.now(timezone.utc) + _get_local_offset()
+
+
+def get_week_type_for_date(
+    current_date: date,
+    reference_date: Optional[date] = None,
+    reference_week_type: int = 1,
+) -> int:
+    if reference_date is None:
+        iso_week = current_date.isocalendar()[1]
+        return 1 if iso_week % 2 else 2
+
+    base_type = 1 if reference_week_type not in (1, 2) else reference_week_type
+    current_monday = current_date - timedelta(days=current_date.isoweekday() - 1)
+    reference_monday = reference_date - timedelta(days=reference_date.isoweekday() - 1)
+    week_shift = (current_monday - reference_monday).days // 7
+
+    if week_shift % 2 == 0:
+        return base_type
+    return 2 if base_type == 1 else 1
 
 
 # ─────────────────────────────────────────────
@@ -499,9 +543,9 @@ async def save_override(group_id: int, override: dict, fallback_date: str = None
             except ValueError:
                 continue
         else:
-            date_str = datetime.now().strftime("%Y-%m-%d")
+            date_str = get_local_now().strftime("%Y-%m-%d")
     else:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = get_local_now().strftime("%Y-%m-%d")
 
     if _get_db_type() == "postgres":
         from database_pg import get_pool
@@ -741,7 +785,7 @@ async def mark_queue_closed(group_id: int, date_str: str):
 # ─────────────────────────────────────────────
 
 async def get_all_lessons_today() -> list[dict]:
-    today = datetime.now()
+    today = get_local_now()
     weekday = today.isoweekday()
     date_str = today.strftime("%Y-%m-%d")
 
@@ -912,8 +956,7 @@ async def update_lesson_field(lesson_id: int, field: str, value: str):
     Обновить одно поле занятия.
     Белый список полей — защита от SQL-инъекций.
     """
-    allowed = {"subject", "teacher", "room", "time_start", "time_end", "lesson_num", "weekday"}
-    if field not in allowed:
+    if field not in _ALLOWED_LESSON_UPDATE_FIELDS:
         raise ValueError(f"Field {field!r} not allowed for update")
 
     if _get_db_type() == "postgres":
@@ -955,8 +998,9 @@ async def add_single_lesson(group_id: int, lesson: dict):
             await conn.execute("""
                 INSERT INTO schedule_lessons
                     (group_id, weekday, lesson_num, subject,
-                     time_start, time_end, room, teacher, skip_queue)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                     time_start, time_end, room, teacher, skip_queue,
+                     week_type, is_event)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
             """, group_id,
                 lesson["weekday"], lesson["lesson_num"],
                 lesson["subject"],
@@ -964,7 +1008,9 @@ async def add_single_lesson(group_id: int, lesson: dict):
                 lesson.get("time_end") or "",
                 lesson.get("room"),
                 lesson.get("teacher"),
-                int(lesson.get("skip_queue", 0)))
+                int(lesson.get("skip_queue", 0)),
+                int(lesson.get("week_type", 0)),
+                int(lesson.get("is_event", 0)))
         return
 
     from database import DB_PATH
@@ -972,8 +1018,9 @@ async def add_single_lesson(group_id: int, lesson: dict):
         await db.execute("""
             INSERT INTO schedule_lessons
                 (group_id, weekday, lesson_num, subject,
-                 time_start, time_end, room, teacher, skip_queue)
-            VALUES (?,?,?,?,?,?,?,?,?)
+                 time_start, time_end, room, teacher, skip_queue,
+                 week_type, is_event)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """, (group_id,
               lesson["weekday"], lesson["lesson_num"],
               lesson["subject"],
@@ -981,7 +1028,9 @@ async def add_single_lesson(group_id: int, lesson: dict):
               lesson.get("time_end") or "",
               lesson.get("room"),
               lesson.get("teacher"),
-              int(lesson.get("skip_queue", 0))))
+              int(lesson.get("skip_queue", 0)),
+              int(lesson.get("week_type", 0)),
+              int(lesson.get("is_event", 0))))
         await db.commit()
 
 
@@ -1038,15 +1087,30 @@ def get_current_week_type() -> int:
       2 = чётная   (2, 4, 6, 8... ISO week)
     Учитывает TZ_OFFSET из .env чтобы использовать локальное время.
     """
-    from datetime import datetime, timezone, timedelta
+    current_date = get_local_now().date()
+    reference_date = None
+    reference_week_type = 1
+
     try:
-        from config import TZ_OFFSET
-        offset = timedelta(hours=TZ_OFFSET)
+        from config import (
+            ACADEMIC_WEEK_REFERENCE_DATE,
+            ACADEMIC_WEEK_REFERENCE_TYPE,
+        )
+
+        raw_reference = (ACADEMIC_WEEK_REFERENCE_DATE or "").strip()
+        if raw_reference:
+            reference_date = date.fromisoformat(raw_reference)
+
+        if ACADEMIC_WEEK_REFERENCE_TYPE in (1, 2):
+            reference_week_type = ACADEMIC_WEEK_REFERENCE_TYPE
     except Exception:
-        offset = timedelta(0)
-    now = datetime.now(timezone.utc) + offset
-    iso_week = now.isocalendar()[1]
-    return 1 if iso_week % 2 != 0 else 2
+        reference_date = None
+
+    return get_week_type_for_date(
+        current_date,
+        reference_date=reference_date,
+        reference_week_type=reference_week_type,
+    )
 
 
 def filter_by_week_type(lessons: list[dict]) -> list[dict]:
