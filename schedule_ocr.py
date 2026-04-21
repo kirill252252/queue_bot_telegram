@@ -493,3 +493,30 @@ def format_schedule(lessons: list[dict]) -> str:
             )
 
     return "\n".join(lines) if lines else "Расписание пусто"
+
+
+# ─────────────────────────────────────────────
+# Функция разделения
+# ─────────────────────────────────────────────
+
+def split_by_week(lessons: list[dict]):
+    even = []
+    odd = []
+
+    for l in lessons:
+        wt = int(l.get("week_type") or 0)
+
+        # 0 = всегда
+        if wt == 0:
+            even.append(l)
+            odd.append(l)
+
+        # 1 = нечётная
+        elif wt == 1:
+            odd.append(l)
+
+        # 2 = чётная
+        elif wt == 2:
+            even.append(l)
+
+    return even, odd
