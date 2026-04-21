@@ -53,6 +53,11 @@ SCHEDULE_PROMPT = """
 • Название группы в заголовке блока (например: «Гр. П-5-24», «Гр. ПК-10-25»)
 • Времени нет на фото → time_start="" и time_end="" ВСЕГДА
 
+══════════════════ ВАЖНОЕ ПРАВИЛО: НЕ ОБЪЕДИНЯТЬ ПАРЫ ══════════════════
+Если одна и та же дисциплина идет несколько раз подряд (например, лента 1 и лента 2 — один предмет), 
+ты ОБЯЗАН создать две разные записи в JSON с разными номерами lesson_num. 
+ЗАПРЕЩЕНО объединять их в одну запись.
+
 ══════════════════ КАК ОПРЕДЕЛЯТЬ ЧЁТНЫЕ/НЕЧЁТНЫЕ НЕДЕЛИ ══════════════════
 
 КЛЮЧЕВОЕ ПРАВИЛО: Одна «лента» (номер пары) может содержать ДВЕ строки в таблице.
@@ -174,8 +179,8 @@ SCHEDULE_REVIEW_PROMPT_TEMPLATE = """
 Тебе дан черновой JSON. Исправь его, если в нём есть ошибки, и верни только JSON в ТОМ ЖЕ формате.
 
 Проверь особенно:
-1. Внеклассные мероприятия и «Разговоры о важном» не считаются парой и не должны сдвигать lesson_num обычных занятий.
-2. Нельзя объединять одинаковые подряд пары. Если у двух соседних лент одинаковые предмет, преподаватель и аудитория, это всё равно ДВЕ записи с разными lesson_num.
+1. НЕ ОБЪЕДИНЯЙ одинаковые пары, идущие подряд. Если лента 1 и 2 имеют один предмет — это ДВЕ записи.
+2. Внеклассные мероприятия и «Разговоры о важном» не считаются парой и не должны сдвигать lesson_num обычных занятий.
 3. Если в одной ленте две строки, это одна и та же пара:
    - верхняя строка = week_type 1
    - нижняя строка = week_type 2
@@ -196,7 +201,7 @@ SCHEDULE_CELL_PROMPT = """
 Сначала определи ЯЧЕЙКИ по видимому номеру пары в колонке «лента», а не плоский список предметов.
 
 Главные правила:
-1. Если у двух соседних строк разные цифры в колонке «лента», это две разные пары, даже если текст одинаковый.
+1. Если у двух соседних строк разные цифры в колонке «лента», это две разные пары, даже если текст одинаковый. НЕ ОБЪЕДИНЯЙ ИХ.
 2. Если под одной и той же цифрой внутри ячейки две строки, это одна пара с разделением по неделям.
 3. Верхняя строка под одним номером пары = нечётная неделя.
 4. Нижняя строка под одним номером пары = чётная неделя.
@@ -265,7 +270,7 @@ SCHEDULE_DAY_PROMPT_TEMPLATE = """
 В этом фрагменте слева есть видимые номера пар, рядом аудитории, справа содержимое ячеек.
 
 Правила:
-1. Если цифры слева разные, это разные пары, даже если текст одинаковый.
+1. Если цифры слева разные, это разные пары, даже если текст одинаковый. НЕ ОБЪЕДИНЯЙ ИХ.
 2. Если под одной цифрой внутри одной ячейки две строки, это одна пара с делением по неделям:
    - верх = week_mode "odd_even" верхняя часть
    - низ  = week_mode "odd_even" нижняя часть
@@ -724,6 +729,10 @@ def _normalize_lessons(raw_lessons: list) -> list[dict]:
 
 
 def _dedupe_lessons(lessons: list[dict]) -> list[dict]:
+    """
+    Удаляет ПОЛНЫЕ дубликаты.
+    ВАЖНО: Теперь мы НЕ вызываем её в конце ремонта расписания, чтобы не съедать пары.
+    """
     seen = set()
     result = []
 
@@ -758,11 +767,8 @@ def _dedupe_lessons(lessons: list[dict]) -> list[dict]:
 
 def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
     """
-    Улучшенная пост-обработка OCR-результата:
-    - мероприятия (is_event) → lesson_num=0, не влияют на нумерацию
-    - consecutive дубли с одинаковыми lesson_num + content + week_type → схлопываем
-    - сдвиг lesson_num назад ТОЛЬКО если мероприятие явно сдвинуло нумерацию
-    - сохраняем исходную нумерацию regular-занятий (пропуски допустимы)
+    Улучшенная пост-обработка OCR-результата.
+    ИСПРАВЛЕНО: Удален блок, который схлопывал идущие подряд одинаковые предметы.
     """
     by_day: dict[int, list[dict]] = {}
     for lesson in lessons:
@@ -783,59 +789,37 @@ def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
             else:
                 regular.append(dict(lesson))
 
-        # 2. Удаляем consecutive дубли внутри regular (одинаковый lesson_num + content + week_type)
-        deduped_regular = []
-        prev_key = None
-        for lesson in sorted(regular, key=lambda x: (
+        # Сортируем по номеру ленты и типу недели
+        regular.sort(key=lambda x: (
             int(x.get("lesson_num") or 0),
-            int(x.get("week_type") or 0),
-            str(x.get("subject") or ""),
-        )):
-            key = (
-                int(lesson.get("lesson_num") or 0),
-                int(lesson.get("week_type") or 0),
-                str(lesson.get("subject") or ""),
-                str(lesson.get("teacher") or ""),
-                str(lesson.get("room") or ""),
-            )
-            if key != prev_key:
-                deduped_regular.append(lesson)
-                prev_key = key
+            int(x.get("week_type") or 0)
+        ))
 
-        # 3. Сдвиг lesson_num: только если мероприятие явно сдвинуло нумерацию
-        # Т.е.: есть events И первая regular пара имеет номер > 1 И lesson_num=1 отсутствует
+        # 2. Сдвиг lesson_num: только если мероприятие явно сдвинуло нумерацию
         regular_numbers = sorted(
             {
                 int(lesson.get("lesson_num") or 0)
-                for lesson in deduped_regular
+                for lesson in regular
                 if int(lesson.get("lesson_num") or 0) > 0
             }
         )
 
         if events and regular_numbers and regular_numbers[0] > 1 and 1 not in regular_numbers:
-            # Мероприятие сдвинуло нумерацию → сдвигаем regular на -1
-            for lesson in deduped_regular:
+            for lesson in regular:
                 old_num = int(lesson.get("lesson_num") or 0)
                 if old_num > 0:
                     lesson["lesson_num"] = old_num - 1
 
-        # 4. Собираем результат
+        # Собираем результат БЕЗ дедупликации!
         repaired.extend(events)
-        repaired.extend(deduped_regular)
+        repaired.extend(regular)
 
-    return _dedupe_lessons(repaired)
+    return repaired
 
 
 def _correct_week_types_after_flat_ocr(result: dict) -> dict:
     """
-    Исправляет ошибку плоского OCR-формата: модель часто назначает week_type=1
-    всем одиночным парам (должно быть 0) и перепутывает верхнюю/нижнюю строки.
-
-    Алгоритм для каждого дня:
-    - Если НЕТ ни одной пары с week_type=0 → подозреваем ошибку
-    - Одиночная пара с week_type=1 без парного week_type=2 → устанавливаем 0
-    - Две пары с одним lesson_num (wt=1 и wt=2) → меняем местами
-      (OCR выдаёт верхнюю строку как wt=2, нижнюю как wt=1 — обратно правильному)
+    Исправляет ошибку плоского OCR-формата.
     """
     if not result or "groups" not in result:
         return result
@@ -860,14 +844,12 @@ def _correct_week_types_after_flat_ocr(result: dict) -> dict:
             wt1 = sum(1 for l in regular if int(l.get("week_type") or 0) == 1)
             wt2 = sum(1 for l in regular if int(l.get("week_type") or 0) == 2)
 
-            # Признак ошибки: нет ни одного week_type=0 И много week_type=1
             is_likely_wrong = (wt0 == 0 and wt1 > 0)
 
             if not is_likely_wrong:
                 fixed_all.extend(day_lessons)
                 continue
 
-            # Группируем по lesson_num
             by_num: dict = {}
             for l in regular:
                 num = int(l.get("lesson_num") or 0)
@@ -877,28 +859,21 @@ def _correct_week_types_after_flat_ocr(result: dict) -> dict:
             for num in sorted(by_num):
                 variants = by_num[num]
                 if len(variants) == 1:
-                    # Единственная запись — занятие каждую неделю
                     l = dict(variants[0])
                     l["week_type"] = 0
                     fixed_regular.append(l)
                 elif len(variants) == 2:
-                    # Дробная пара:
-                    # OCR назначает верхней строке wt=2, нижней — wt=1 (обратно)
-                    # Сортируем по (wt, subject) → [wt=1(нижняя OCR), wt=2(верхняя OCR)]
                     sorted_v = sorted(variants, key=lambda x: (
                         int(x.get("week_type") or 0),
                         str(x.get("subject") or "")
                     ))
-                    # Меняем местами: первый (wt=1, нижняя) → wt=2(чётная)
-                    #                  второй (wt=2, верхняя) → wt=1(нечётная)
-                    l_lower = dict(sorted_v[0])  # OCR: wt=1 (нижняя строка)
-                    l_upper = dict(sorted_v[1])  # OCR: wt=2 (верхняя строка)
-                    l_lower["week_type"] = 2  # нижняя = чётная неделя
-                    l_upper["week_type"] = 1  # верхняя = нечётная неделя
-                    fixed_regular.append(l_upper)  # нечётная первой
-                    fixed_regular.append(l_lower)  # чётная второй
+                    l_lower = dict(sorted_v[0])
+                    l_upper = dict(sorted_v[1])
+                    l_lower["week_type"] = 2
+                    l_upper["week_type"] = 1
+                    fixed_regular.append(l_upper)
+                    fixed_regular.append(l_lower)
                 else:
-                    # 3+ вариантов — нестандартный случай, оставляем как есть
                     fixed_regular.extend(variants)
 
             fixed_all.extend(events)
@@ -948,10 +923,6 @@ async def _review_schedule_parse(
     media_type: str,
     draft_result: dict,
 ) -> Optional[dict]:
-    """
-    Второй проход по тому же изображению: просим модель проверить готовый JSON
-    и исправить lesson_num/week_type, если она схлопнула пары или сдвинула ленты.
-    """
     prompt = SCHEDULE_REVIEW_PROMPT_TEMPLATE.format(
         draft_json=json.dumps(draft_result, ensure_ascii=False, indent=2)
     )
@@ -974,9 +945,6 @@ async def _call_groq_vision(
     media_type: str = "image/jpeg",
     max_tokens: int = 4096,
 ) -> Optional[dict]:
-    """
-    Отправляем изображение + промпт в Groq Vision API.
-    """
     if not GROQ_API_KEY:
         logger.error("GROQ_API_KEY is not set — cannot call Groq Vision")
         return None
@@ -1010,20 +978,13 @@ async def _call_groq_vision(
                     error_text = await resp.text()
                     logger.error(f"Groq Vision API error {resp.status}: {error_text}")
                     return None
-
                 data = await resp.json()
-
                 try:
                     content = data["choices"][0]["message"]["content"]
                 except (KeyError, IndexError) as e:
                     logger.error(f"Unexpected Groq response structure: {e}\n{data}")
                     return None
-
                 return _extract_json(content)
-
-    except aiohttp.ClientError as e:
-        logger.error(f"Groq Vision network error: {e}")
-        return None
     except Exception as e:
         logger.error(f"Groq Vision call exception: {e}")
         return None
@@ -1037,9 +998,6 @@ async def _call_groq_text(
     prompt: str,
     max_tokens: int = 1024,
 ) -> Optional[dict]:
-    """
-    Отправляем текстовый запрос в Groq (без изображения).
-    """
     if not GROQ_API_KEY:
         logger.error("GROQ_API_KEY is not set — cannot call Groq")
         return None
@@ -1064,20 +1022,13 @@ async def _call_groq_text(
                     error_text = await resp.text()
                     logger.error(f"Groq Text API error {resp.status}: {error_text}")
                     return None
-
                 data = await resp.json()
-
                 try:
                     content = data["choices"][0]["message"]["content"]
                 except (KeyError, IndexError) as e:
                     logger.error(f"Unexpected Groq response structure: {e}\n{data}")
                     return None
-
                 return _extract_json(content)
-
-    except aiohttp.ClientError as e:
-        logger.error(f"Groq Text network error: {e}")
-        return None
     except Exception as e:
         logger.error(f"Groq Text call exception: {e}")
         return None
@@ -1092,8 +1043,6 @@ async def parse_schedule_image(
 ) -> Optional[dict]:
     """
     Распознаём базовое расписание с фотографии.
-    Возвращает: {"groups": [{"group_name": ..., "lessons": [...]}, ...]}
-    Для обратной совместимости также поддерживает старый формат {"group_name": ..., "lessons": [...]}.
     """
     cell_result = await _call_groq_vision(
         prompt=SCHEDULE_CELL_PROMPT,
@@ -1153,8 +1102,6 @@ async def parse_schedule_image(
     if reviewed_result:
         result = reviewed_result
 
-    # Применяем коррекцию week_type к результатам плоского формата
-    # (ячеечный формат уже имеет правильные week_type через _expand_schedule_cells)
     normalized = _correct_week_types_after_flat_ocr(_normalize_schedule_result(result))
     _debug_dump_schedule("normalized_result", normalized)
     if _schedule_candidate_score(normalized) > _schedule_candidate_score(best_candidate):
@@ -1174,17 +1121,12 @@ async def parse_schedule_image(
 async def parse_change_image(
     image_bytes: bytes, media_type: str = "image/jpeg"
 ) -> Optional[dict]:
-    """
-    Распознаём изменения расписания с фотографии.
-    Возвращает: {"date": "YYYY-MM-DD", "changes": [...]}
-    """
     result = await _call_groq_vision(
         prompt=CHANGE_PROMPT,
         image_bytes=image_bytes,
         media_type=media_type,
         max_tokens=4096,
     )
-    # Нормализуем: если нет поля date — добавляем null
     if result and "changes" in result and "date" not in result:
         result["date"] = None
     return result
@@ -1195,10 +1137,6 @@ async def parse_change_image(
 # ─────────────────────────────────────────────
 
 async def parse_change_text(text: str) -> Optional[dict]:
-    """
-    Распознаём изменения расписания из текстового сообщения.
-    Возвращает: {"changes": [...]}
-    """
     keywords = ["отмен", "перенос", "замен", "пар", "лекц", "семинар", "расписани"]
     if not any(k in text.lower() for k in keywords):
         return None
@@ -1216,13 +1154,7 @@ async def parse_schedule_change(
     image_bytes: Optional[bytes] = None,
     media_type: str = "image/jpeg",
 ) -> Optional[dict]:
-    """
-    Универсальный парсер изменений — принимает текст и/или изображение.
-    Используется source_monitor.py для разбора постов из VK и Telegram.
-    Возвращает: {"changes": [...]}
-    """
     if image_bytes:
-        # Если есть картинка — используем vision модель
         prompt = CHANGE_PROMPT
         if text:
             prompt += f"\n\nТекст поста:\n{text}"
@@ -1233,7 +1165,6 @@ async def parse_schedule_change(
             max_tokens=2048,
         )
     elif text:
-        # Только текст — используем текстовую модель (быстрее)
         return await parse_change_text(text)
     else:
         return None
@@ -1277,17 +1208,11 @@ def split_by_week(lessons: list[dict]):
 
     for l in lessons:
         wt = int(l.get("week_type") or 0)
-
-        # 0 = всегда
         if wt == 0:
             even.append(l)
             odd.append(l)
-
-        # 1 = нечётная
         elif wt == 1:
             odd.append(l)
-
-        # 2 = чётная
         elif wt == 2:
             even.append(l)
 
