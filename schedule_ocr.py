@@ -164,6 +164,28 @@ weekday: 1=Пн, 2=Вт, 3=Ср, 4=Чт, 5=Пт, 6=Сб, 7=Вс.
 """
 
 
+SCHEDULE_REVIEW_PROMPT_TEMPLATE = """
+Ты выполняешь вторую проверку уже распознанного расписания по тому же изображению.
+
+Тебе дан черновой JSON. Исправь его, если в нём есть ошибки, и верни только JSON в ТОМ ЖЕ формате.
+
+Проверь особенно:
+1. Внеклассные мероприятия и «Разговоры о важном» не считаются парой и не должны сдвигать lesson_num обычных занятий.
+2. Нельзя объединять одинаковые подряд пары. Если у двух соседних лент одинаковые предмет, преподаватель и аудитория, это всё равно ДВЕ записи с разными lesson_num.
+3. Если в одной ленте две строки, это одна и та же пара:
+   - верхняя строка = week_type 1
+   - нижняя строка = week_type 2
+   - обе записи должны иметь один и тот же lesson_num
+4. Если верхняя половина ячейки пустая/прочерк, а нижняя содержит предмет, это только week_type 2.
+5. Если нижняя половина ячейки пустая/прочерк, а верхняя содержит предмет, это только week_type 1.
+6. Не превращай одну дробную ячейку в две разные последовательные пары.
+7. Не теряй занятия из лент 1/2/3 и т.д., даже если предметы одинаковые.
+
+Черновой JSON:
+{draft_json}
+"""
+
+
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -196,6 +218,196 @@ def _groq_headers() -> dict:
         "Content-Type": "application/json",
         "Authorization": f"Bearer {GROQ_API_KEY}",
     }
+
+
+EVENT_KEYWORDS = (
+    "разговор о важном",
+    "разговоры о важном",
+    "внеклассное",
+    "классный час",
+    "воспитательное",
+)
+
+
+def _normalize_lessons(raw_lessons: list) -> list[dict]:
+    """
+    Приводим уроки к единому виду после OCR.
+    """
+    out = []
+    for raw in raw_lessons:
+        if not isinstance(raw, dict):
+            continue
+
+        lesson = dict(raw)
+
+        try:
+            lesson["weekday"] = int(lesson.get("weekday"))
+            lesson["lesson_num"] = int(lesson.get("lesson_num") or 0)
+        except (TypeError, ValueError):
+            continue
+
+        subject = str(lesson.get("subject") or "").strip()
+        if not subject:
+            continue
+        lesson["subject"] = subject
+
+        lesson["teacher"] = str(lesson.get("teacher") or "").strip() or None
+        lesson["room"] = str(lesson.get("room") or "").strip() or None
+        lesson["time_start"] = str(lesson.get("time_start") or "").strip()
+        lesson["time_end"] = str(lesson.get("time_end") or "").strip()
+
+        try:
+            lesson["week_type"] = int(lesson.get("week_type") or 0)
+        except (ValueError, TypeError):
+            lesson["week_type"] = 0
+
+        try:
+            lesson["is_event"] = int(lesson.get("is_event") or 0)
+        except (ValueError, TypeError):
+            lesson["is_event"] = 0
+
+        if any(keyword in subject.lower() for keyword in EVENT_KEYWORDS):
+            lesson["is_event"] = 1
+
+        out.append(lesson)
+
+    return out
+
+
+def _dedupe_lessons(lessons: list[dict]) -> list[dict]:
+    seen = set()
+    result = []
+
+    for lesson in sorted(
+        lessons,
+        key=lambda item: (
+            int(item.get("weekday") or 0),
+            int(item.get("lesson_num") or 0),
+            int(item.get("week_type") or 0),
+            str(item.get("subject") or ""),
+            str(item.get("teacher") or ""),
+            str(item.get("room") or ""),
+            int(item.get("is_event") or 0),
+        ),
+    ):
+        key = (
+            int(lesson.get("weekday") or 0),
+            int(lesson.get("lesson_num") or 0),
+            str(lesson.get("subject") or ""),
+            str(lesson.get("teacher") or ""),
+            str(lesson.get("room") or ""),
+            int(lesson.get("week_type") or 0),
+            int(lesson.get("is_event") or 0),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(lesson)
+
+    return result
+
+
+def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
+    """
+    Локальная защита от самых частых OCR-ошибок:
+    - мероприятие не считается парой и не должно сдвигать обычные lesson_num
+    - точные дубли одной и той же записи схлопываем
+    """
+    by_day: dict[int, list[dict]] = {}
+    for lesson in lessons:
+        by_day.setdefault(int(lesson.get("weekday") or 0), []).append(dict(lesson))
+
+    repaired = []
+    for weekday in sorted(by_day):
+        day_lessons = by_day[weekday]
+        events = []
+        regular = []
+
+        for lesson in day_lessons:
+            if int(lesson.get("is_event") or 0):
+                event_lesson = dict(lesson)
+                event_lesson["lesson_num"] = 0
+                events.append(event_lesson)
+            else:
+                regular.append(dict(lesson))
+
+        regular_numbers = sorted(
+            {
+                int(lesson.get("lesson_num") or 0)
+                for lesson in regular
+                if int(lesson.get("lesson_num") or 0) > 0
+            }
+        )
+
+        # Если OCR посчитал мероприятие "нулевой" парой как первую ленту,
+        # сдвигаем обычные занятия обратно.
+        if events and regular_numbers and regular_numbers[0] > 1 and 1 not in regular_numbers:
+            shifted_regular = []
+            for lesson in regular:
+                shifted = dict(lesson)
+                shifted["lesson_num"] = max(1, int(shifted.get("lesson_num") or 0) - 1)
+                shifted_regular.append(shifted)
+            regular = shifted_regular
+
+        repaired.extend(events)
+        repaired.extend(regular)
+
+    return _dedupe_lessons(repaired)
+
+
+def _normalize_schedule_result(result: dict) -> Optional[dict]:
+    if not result or not isinstance(result, dict):
+        return None
+
+    if "error" in result:
+        logger.warning(f"Groq schedule parse error: {result['error']}")
+        return None
+
+    if "groups" in result:
+        groups = []
+        for group in result.get("groups", []):
+            if not isinstance(group, dict):
+                continue
+            lessons = _repair_group_lessons(_normalize_lessons(group.get("lessons", [])))
+            if not lessons:
+                continue
+            groups.append({
+                "group_name": group.get("group_name") or "Группа",
+                "lessons": lessons,
+            })
+        return {"groups": groups} if groups else None
+
+    lessons = _repair_group_lessons(_normalize_lessons(result.get("lessons", [])))
+    if not lessons:
+        return None
+
+    return {
+        "groups": [{
+            "group_name": result.get("group_name") or "Группа",
+            "lessons": lessons,
+        }]
+    }
+
+
+async def _review_schedule_parse(
+    image_bytes: bytes,
+    media_type: str,
+    draft_result: dict,
+) -> Optional[dict]:
+    """
+    Второй проход по тому же изображению: просим модель проверить готовый JSON
+    и исправить lesson_num/week_type, если она схлопнула пары или сдвинула ленты.
+    """
+    prompt = SCHEDULE_REVIEW_PROMPT_TEMPLATE.format(
+        draft_json=json.dumps(draft_result, ensure_ascii=False, indent=2)
+    )
+    reviewed = await _call_groq_vision(
+        prompt=prompt,
+        image_bytes=image_bytes,
+        media_type=media_type,
+        max_tokens=8192,
+    )
+    return reviewed if isinstance(reviewed, dict) else None
 
 
 # ─────────────────────────────────────────────
@@ -329,70 +541,30 @@ async def parse_schedule_image(
     Возвращает: {"groups": [{"group_name": ..., "lessons": [...]}, ...]}
     Для обратной совместимости также поддерживает старый формат {"group_name": ..., "lessons": [...]}.
     """
-    result = await _call_groq_vision(
+    initial_result = await _call_groq_vision(
         prompt=SCHEDULE_PROMPT,
         image_bytes=image_bytes,
         media_type=media_type,
         max_tokens=8192,
     )
 
-    if not result or not isinstance(result, dict):
+    if not initial_result or not isinstance(initial_result, dict):
         return None
 
-    if "error" in result:
-        logger.warning(f"Groq schedule parse error: {result['error']}")
-        return None
+    result = initial_result
+    reviewed_result = await _review_schedule_parse(
+        image_bytes=image_bytes,
+        media_type=media_type,
+        draft_result=initial_result,
+    )
+    if reviewed_result:
+        result = reviewed_result
 
-    required_keys = ("weekday", "lesson_num", "subject")
+    normalized = _normalize_schedule_result(result)
+    if normalized:
+        return normalized
 
-    def _normalize(raw_lessons: list) -> list:
-        """
-        Нормализуем занятия из ответа модели:
-        - Проверяем наличие обязательных полей
-        - Устанавливаем дефолты для week_type и is_event
-        - Автодетект мероприятий по ключевым словам (резерв)
-        """
-        out = []
-        event_kw = ["разговор о важном", "разговоры о важном",
-                    "внеклассное", "классный час", "воспитательное"]
-        for l in raw_lessons:
-            if not all(k in l for k in required_keys):
-                continue
-            # Нормализуем week_type (модель может вернуть строку или пропустить)
-            try:
-                l["week_type"] = int(l.get("week_type") or 0)
-            except (ValueError, TypeError):
-                l["week_type"] = 0
-            # Нормализуем is_event
-            try:
-                l["is_event"] = int(l.get("is_event") or 0)
-            except (ValueError, TypeError):
-                l["is_event"] = 0
-            # Автодетект мероприятий если модель не проставила флаг
-            subj = str(l.get("subject", "")).lower()
-            if any(kw in subj for kw in event_kw):
-                l["is_event"] = 1
-            # Нормализуем time_start/time_end
-            l["time_start"] = l.get("time_start") or ""
-            l["time_end"]   = l.get("time_end") or ""
-            out.append(l)
-        return out
-
-    # Новый формат: несколько групп
-    if "groups" in result:
-        for group in result["groups"]:
-            group["lessons"] = _normalize(group.get("lessons", []))
-        result["groups"] = [g for g in result["groups"] if g.get("lessons")]
-        return result if result["groups"] else None
-
-    # Старый/упрощённый формат: одна группа
-    lessons = _normalize(result.get("lessons", []))
-    return {
-        "groups": [{
-            "group_name": result.get("group_name") or "Группа",
-            "lessons": lessons,
-        }]
-    } if lessons else None
+    return _normalize_schedule_result(initial_result)
 
 
 # ─────────────────────────────────────────────
