@@ -59,8 +59,8 @@ async def _init_sqlite():
                 teacher TEXT,
                 is_active INTEGER DEFAULT 1,
                 skip_queue INTEGER DEFAULT 0,
-                week_type INTEGER DEFAULT 0,
-                is_event INTEGER DEFAULT 0
+                week_type  INTEGER DEFAULT 0,
+                is_event   INTEGER DEFAULT 0
             )
         """)
 
@@ -125,7 +125,7 @@ async def _init_sqlite():
             )
         """)
 
-        # Настройки уведомлений расписания для каждого чата
+        # Настройки уведомлений расписания
         await db.execute("""
             CREATE TABLE IF NOT EXISTS schedule_chat_settings (
                 chat_id INTEGER PRIMARY KEY,
@@ -134,7 +134,6 @@ async def _init_sqlite():
                 notify_before_min INTEGER DEFAULT 0
             )
         """)
-
         await db.commit()
 
 
@@ -164,8 +163,8 @@ async def _init_pg():
                 teacher TEXT,
                 is_active INTEGER DEFAULT 1,
                 skip_queue INTEGER DEFAULT 0,
-                week_type INTEGER DEFAULT 0,
-                is_event INTEGER DEFAULT 0
+                week_type  INTEGER DEFAULT 0,
+                is_event   INTEGER DEFAULT 0
             )
         """)
         await conn.execute("""
@@ -222,14 +221,22 @@ async def _init_pg():
             )
         """)
 
+        # Настройки уведомлений расписания (вкл/выкл, заранее)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule_chat_settings (
+                chat_id BIGINT PRIMARY KEY,
+                notify_on_open INTEGER DEFAULT 1,
+                notify_on_close INTEGER DEFAULT 1,
+                notify_before_min INTEGER DEFAULT 0
+            )
+        """)
+
         # ── Миграции: добавляем колонки которых может не быть в старой БД ──
         # CREATE TABLE IF NOT EXISTS не трогает уже существующие таблицы,
         # поэтому добавляем недостающие колонки через ALTER TABLE.
         migrations = [
             # schedule_lessons
             "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS lesson_num  INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS week_type   INTEGER DEFAULT 0",
-            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS is_event    INTEGER DEFAULT 0",
             "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS weekday     INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS time_start  TEXT NOT NULL DEFAULT '00:00'",
             "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS time_end    TEXT NOT NULL DEFAULT '00:00'",
@@ -237,6 +244,8 @@ async def _init_pg():
             "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS teacher     TEXT",
             "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS is_active   INTEGER DEFAULT 1",
             "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS skip_queue  INTEGER DEFAULT 0",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS week_type   INTEGER DEFAULT 0",
+            "ALTER TABLE schedule_lessons ADD COLUMN IF NOT EXISTS is_event    INTEGER DEFAULT 0",
             # schedule_overrides
             "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS lesson_num    INTEGER",
             "ALTER TABLE schedule_overrides ADD COLUMN IF NOT EXISTS action        TEXT",
@@ -405,8 +414,8 @@ async def save_lessons(group_id: int, lessons: list[dict]):
                     l.get("time_start") or "",
                     l.get("time_end") or "",
                     l.get("room"), l.get("teacher"),
-                    int(l.get("week_type", 0)),
-                    int(l.get("is_event", 0)))
+                    int(l.get("week_type") or 0),
+                    int(l.get("is_event") or 0))
         return
 
     from database import DB_PATH
@@ -426,8 +435,8 @@ async def save_lessons(group_id: int, lessons: list[dict]):
                   l.get("time_start") or "",
                   l.get("time_end") or "",
                   l.get("room"), l.get("teacher"),
-                  int(l.get("week_type", 0)),
-                  int(l.get("is_event", 0))))
+                  int(l.get("week_type") or 0),
+                  int(l.get("is_event") or 0)))
         await db.commit()
 
 
@@ -1019,16 +1028,15 @@ async def delete_bell(chat_id: int, lesson_num: int):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ЧЁТНЫЕ/НЕЧЁТНЫЕ НЕДЕЛИ
+# ЧЁТНЫЕ / НЕЧЁТНЫЕ НЕДЕЛИ
 # ═══════════════════════════════════════════════════════════════════
 
 def get_current_week_type() -> int:
     """
-    Возвращает тип текущей недели:
-      0 = любая (оба типа занятий идут)
-      1 = нечётная неделя
-      2 = чётная неделя
-    Используем ISO-номер недели: 1 = нечётная, 2 = чётная и т.д.
+    Тип ТЕКУЩЕЙ учебной недели по ISO-номеру:
+      1 = нечётная (1, 3, 5, 7... ISO week)
+      2 = чётная   (2, 4, 6, 8... ISO week)
+    Учитывает TZ_OFFSET из .env чтобы использовать локальное время.
     """
     from datetime import datetime, timezone, timedelta
     try:
@@ -1043,111 +1051,107 @@ def get_current_week_type() -> int:
 
 def filter_by_week_type(lessons: list[dict]) -> list[dict]:
     """
-    Фильтрует занятия по типу недели.
-    week_type=0 → занятие идёт каждую неделю
-    week_type=1 → только по нечётным неделям
-    week_type=2 → только по чётным неделям
-    Занятия is_event=1 (Разговоры о важном и т.п.) полностью пропускаются.
+    Фильтрует занятия под ТЕКУЩУЮ неделю.
+
+    Правила для каждого занятия:
+      week_type = 0 → идёт каждую неделю (включаем всегда)
+      week_type = 1 → только нечётная неделя
+      week_type = 2 → только чётная неделя
+      is_event  = 1 → мероприятие (Разговоры о важном и т.п.) — пропускаем
+
+    Примеры из расписания П-5-24:
+      Пн лента 2 нечётная: Инструментальные средства (week_type=1)
+      Пн лента 2 чётная:   Программирование web-приложений (week_type=2)
+      Ср лента 1: только на чётной (week_type=2), на нечётной — прочерк
+      Ср лента 5: только на нечётной (week_type=1), на чётной — прочерк
     """
     current = get_current_week_type()
     result = []
-    for l in lessons:
-        if l.get("is_event"):
-            continue  # мероприятие — не создаём очередь
-        wt = l.get("week_type", 0)
+    for lesson in lessons:
+        if int(lesson.get("is_event") or 0):
+            continue  # мероприятие — без очереди
+        wt = int(lesson.get("week_type") or 0)
         if wt == 0 or wt == current:
-            result.append(l)
+            result.append(lesson)
     return result
 
 
-# Ключевые слова мероприятий — они не должны создавать очереди
-EVENT_KEYWORDS = [
-    "разговор", "разговоры", "разговоры о важном",
-    "внеклассное", "внеурочное", "классный час",
-    "воспитательное", "мероприятие",
+# Ключевые слова для автодетекта мероприятий в названии предмета
+_EVENT_KEYWORDS = [
+    "разговор о важном", "разговоры о важном",
+    "внеклассное", "классный час", "воспитательное", "мероприятие",
 ]
 
 
 def is_event_lesson(subject: str) -> bool:
-    """Проверяем: является ли занятие внеклассным мероприятием."""
+    """True если занятие — внеклассное мероприятие (не создаём очередь)."""
     s = subject.lower()
-    return any(kw in s for kw in EVENT_KEYWORDS)
+    return any(kw in s for kw in _EVENT_KEYWORDS)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# НАСТРОЙКИ УВЕДОМЛЕНИЙ РАСПИСАНИЯ (schedule_chat_settings)
+# НАСТРОЙКИ УВЕДОМЛЕНИЙ РАСПИСАНИЯ
 # ═══════════════════════════════════════════════════════════════════
 
 async def get_chat_schedule_settings(chat_id: int) -> dict:
     """
     Настройки уведомлений расписания для чата.
-    Если запись отсутствует — возвращает дефолт (всё включено).
+    Дефолт если не настроено: всё включено.
     """
     if _get_db_type() == "postgres":
         from database_pg import get_pool
         pool = await get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM schedule_chat_settings WHERE chat_id = $1", chat_id
+                "SELECT * FROM schedule_chat_settings WHERE chat_id=$1", chat_id
             )
             if row:
                 return dict(row)
     else:
         rows = await _fetchall(
-            "SELECT * FROM schedule_chat_settings WHERE chat_id = ?", (chat_id,)
+            "SELECT * FROM schedule_chat_settings WHERE chat_id=?", (chat_id,)
         )
         if rows:
             return rows[0]
-
-    # Дефолт: всё включено
-    return {
-        "chat_id": chat_id,
-        "notify_on_open":    1,
-        "notify_on_close":   1,
-        "notify_before_min": 0,
-    }
+    return {"chat_id": chat_id, "notify_on_open": 1, "notify_on_close": 1, "notify_before_min": 0}
 
 
 async def update_chat_schedule_settings(chat_id: int, **kwargs):
-    """Создаёт или обновляет настройки уведомлений расписания (UPSERT)."""
+    """UPSERT настроек уведомлений расписания."""
     allowed = {"notify_on_open", "notify_on_close", "notify_before_min"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return
-
     if _get_db_type() == "postgres":
         from database_pg import get_pool
         pool = await get_pool()
         async with pool.acquire() as conn:
-            set_clause   = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
-            col_names    = ", ".join(updates.keys())
-            placeholders = ", ".join(f"${i+2}" for i in range(len(updates)))
-            vals = list(updates.values())
-            await conn.execute(f"""
-                INSERT INTO schedule_chat_settings (chat_id, {col_names})
-                VALUES ($1, {placeholders})
-                ON CONFLICT (chat_id) DO UPDATE SET {set_clause}
-            """, chat_id, *vals)
+            set_c = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(updates))
+            cols  = ", ".join(updates.keys())
+            ph    = ", ".join(f"${i+2}" for i in range(len(updates)))
+            await conn.execute(
+                f"INSERT INTO schedule_chat_settings (chat_id, {cols}) "
+                f"VALUES ($1, {ph}) ON CONFLICT (chat_id) DO UPDATE SET {set_c}",
+                chat_id, *list(updates.values())
+            )
         return
-
     from database import DB_PATH
     async with aiosqlite.connect(DB_PATH) as db:
-        set_clause   = ", ".join(f"{k} = ?" for k in updates)
-        col_names    = ", ".join(updates.keys())
-        placeholders = ", ".join("?" for _ in updates)
-        vals = list(updates.values())
-        await db.execute(f"""
-            INSERT INTO schedule_chat_settings (chat_id, {col_names})
-            VALUES (?, {placeholders})
-            ON CONFLICT(chat_id) DO UPDATE SET {set_clause}
-        """, [chat_id] + vals + vals)
+        set_c = ", ".join(f"{k} = ?" for k in updates)
+        cols  = ", ".join(updates.keys())
+        ph    = ", ".join("?" for _ in updates)
+        vals  = list(updates.values())
+        await db.execute(
+            f"INSERT INTO schedule_chat_settings (chat_id, {cols}) "
+            f"VALUES (?, {ph}) ON CONFLICT(chat_id) DO UPDATE SET {set_c}",
+            [chat_id] + vals + vals
+        )
         await db.commit()
 
 
 async def toggle_chat_schedule_setting(chat_id: int, field: str) -> bool:
-    """Переключает bool-поле настроек (0→1, 1→0). Возвращает новое значение."""
-    allowed = {"notify_on_open", "notify_on_close"}
-    if field not in allowed:
+    """Переключает bool-поле (0→1, 1→0). Возвращает новое значение."""
+    if field not in {"notify_on_open", "notify_on_close"}:
         raise ValueError(f"Field {field!r} not toggleable")
     settings = await get_chat_schedule_settings(chat_id)
     new_val  = 0 if settings.get(field, 1) else 1
