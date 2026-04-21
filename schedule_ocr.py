@@ -735,7 +735,6 @@ def _dedupe_lessons(lessons: list[dict]) -> list[dict]:
     """
     ВАЖНО: Я отключил вызов этой функции в конце _repair_group_lessons,
     чтобы бот не удалял одинаковые пары подряд.
-    Оставляем функцию в коде просто для сохранения структуры.
     """
     seen = set()
     result = []
@@ -800,6 +799,7 @@ def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
         ))
 
         # 2. Сдвиг lesson_num: только если мероприятие явно сдвинуло нумерацию
+        # Т.е.: есть events И первая regular пара имеет номер > 1 И lesson_num=1 отсутствует
         regular_numbers = sorted(
             {
                 int(lesson.get("lesson_num") or 0)
@@ -1052,6 +1052,9 @@ async def _call_groq_text(
 async def parse_schedule_image(
     image_bytes: bytes, media_type: str = "image/jpeg"
 ) -> Optional[dict]:
+    # Инициализируем переменную для безопасности
+    best_candidate = None
+
     cell_result = await _call_groq_vision(
         prompt=SCHEDULE_CELL_PROMPT,
         image_bytes=image_bytes,
@@ -1061,10 +1064,10 @@ async def parse_schedule_image(
     _debug_dump_schedule("cell_result", cell_result)
     expanded_cells = _expand_schedule_cells(cell_result)
     _debug_dump_schedule("expanded_cells", expanded_cells)
-    normalized_cells = None
+    
     if expanded_cells:
-        normalized_cells = _normalize_schedule_result(expanded_cells)
-        _debug_dump_schedule("normalized_cells", normalized_cells)
+        best_candidate = _normalize_schedule_result(expanded_cells)
+        _debug_dump_schedule("normalized_cells", best_candidate)
 
     crop_group_name = "Группа"
     if isinstance(cell_result, dict):
@@ -1083,7 +1086,10 @@ async def parse_schedule_image(
     )
     _debug_dump_schedule("day_crop_result", day_crop_result)
     normalized_day_crop = _normalize_schedule_result(day_crop_result) if day_crop_result else None
-    _debug_dump_schedule("normalized_day_crop", normalized_day_crop)
+    
+    if normalized_day_crop:
+        if not best_candidate or _schedule_candidate_score(normalized_day_crop) > _schedule_candidate_score(best_candidate):
+            best_candidate = normalized_day_crop
 
     initial_result = await _call_groq_vision(
         prompt=SCHEDULE_PROMPT,
@@ -1093,29 +1099,20 @@ async def parse_schedule_image(
     )
     _debug_dump_schedule("initial_result", initial_result)
 
-    if not initial_result or not isinstance(initial_result, dict):
-        return best_candidate
+    if initial_result and isinstance(initial_result, dict) and "error" not in initial_result:
+        result = initial_result
+        reviewed_result = await _review_schedule_parse(
+            image_bytes=image_bytes,
+            media_type=media_type,
+            draft_result=initial_result,
+        )
+        _debug_dump_schedule("reviewed_result", reviewed_result)
+        if reviewed_result:
+            result = reviewed_result
 
-    result = initial_result
-    reviewed_result = await _review_schedule_parse(
-        image_bytes=image_bytes,
-        media_type=media_type,
-        draft_result=initial_result,
-    )
-    _debug_dump_schedule("reviewed_result", reviewed_result)
-    if reviewed_result:
-        result = reviewed_result
-
-    # Применяем коррекцию week_type
-    normalized = _correct_week_types_after_flat_ocr(_normalize_schedule_result(result))
-    _debug_dump_schedule("normalized_result", normalized)
-    
-    # Выбираем лучший
-    best_candidate = normalized
-    if _schedule_candidate_score(normalized_cells) > _schedule_candidate_score(best_candidate):
-        best_candidate = normalized_cells
-    if _schedule_candidate_score(normalized_day_crop) > _schedule_candidate_score(best_candidate):
-        best_candidate = normalized_day_crop
+        normalized = _correct_week_types_after_flat_ocr(_normalize_schedule_result(result))
+        if not best_candidate or _schedule_candidate_score(normalized) > _schedule_candidate_score(best_candidate):
+            best_candidate = normalized
 
     return best_candidate
 
@@ -1152,7 +1149,7 @@ async def parse_change_text(text: str) -> Optional[dict]:
 
 
 # ─────────────────────────────────────────────
-# PARSE CHANGE (TEXT + OPTIONAL IMAGE)
+# PARSE CHANGE (TEXT + OPTIONAL IMAGE) — для source_monitor
 # ─────────────────────────────────────────────
 
 async def parse_schedule_change(
@@ -1177,7 +1174,7 @@ async def parse_schedule_change(
 
 
 # ─────────────────────────────────────────────
-# FORMAT SCHEDULE
+# FORMAT SCHEDULE — форматирование для отображения
 # ─────────────────────────────────────────────
 
 def format_schedule(lessons: list[dict]) -> str:
@@ -1190,7 +1187,7 @@ def format_schedule(lessons: list[dict]) -> str:
     lines = []
     for wd in sorted(by_day):
         lines.append(f"\n<b>📅 {days.get(wd, str(wd))}</b>")
-        for l in sorted(by_day[wd], key=lambda x: (x["lesson_num"], x.get("week_type", 0))):
+        for l in sorted(by_day[wd], key=lambda x: x["lesson_num"]):
             teacher = f" — {l['teacher']}" if l.get("teacher") else ""
             room = f" [{l['room']}]" if l.get("room") else ""
             ts = l.get("time_start") or ""
