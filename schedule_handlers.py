@@ -33,6 +33,7 @@ from schedule_ocr import (
     parse_schedule_image,
     parse_schedule_change,
     format_schedule,
+    split_by_week,
 )
 from schedule_manager import get_today_schedule, get_week_schedule
 from schedule_ui import schedule_main_keyboard
@@ -244,7 +245,17 @@ async def fsm_receive_schedule_photo(message: Message, state: FSMContext):
         return
 
     groups_text = "\n".join(f"  👥 <b>{name}</b> — {cnt} занятий" for name, cnt in saved_groups)
-    preview = format_schedule(groups_data[0].get("lessons", []))  # показываем первую группу
+
+    preview_lessons = groups_data[0].get("lessons", [])
+    even_lessons, odd_lessons = split_by_week(preview_lessons)
+    even_text = format_schedule(even_lessons)
+    odd_text = format_schedule(odd_lessons)
+    preview = (
+        "📅 <b>Чётная неделя</b>\n"
+        f"{even_text}\n\n"
+        "📅 <b>Нечётная неделя</b>\n"
+        f"{odd_text}"
+    )
 
     await status_msg.edit_text(
         f"✅ <b>Расписание сохранено!</b>\n\n"
