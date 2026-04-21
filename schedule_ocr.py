@@ -44,6 +44,14 @@ OCR_DEBUG = os.getenv("SCHEDULE_OCR_DEBUG", "").strip().lower() in {"1", "true",
 SCHEDULE_PROMPT = """
 Ты — точный парсер расписания учебных занятий. Анализируй таблицу ОЧЕНЬ внимательно.
 
+══════════════════════ КРИТИЧЕСКОЕ ПРАВИЛО ══════════════════════
+1. ЗАПРЕЩЕНО ОБЪЕДИНЯТЬ ОДИНАКОВЫЕ ПАРЫ ПОДРЯД.
+   Если в расписании идут подряд две строки с одним и тем же предметом — это ДВЕ РАЗНЫЕ пары.
+   Ты ОБЯЗАН создать ДВА объекта в JSON с РАЗНЫМИ lesson_num (например, 1 и 2).
+2. Верхняя строка в ячейке = НЕДЕЛЯ 1 (нечётная, week_type=1)
+   Нижняя строка в ячейке = НЕДЕЛЯ 2 (чётная, week_type=2)
+   Строго соблюдай это правило и не путай верх и низ! Если предмет в нижней строке — ставь ему week_type: 2.
+
 ══════════════════════ СТРУКТУРА ТАБЛИЦЫ ══════════════════════
 • Дни недели написаны вертикально слева (ПОНЕДЕЛЬНИК, ВТОРНИК, СРЕДА, ЧЕТВЕРГ, ПЯТНИЦА, СУББОТА)
 • «Лента» (или «лента») = номер пары → lesson_num
@@ -52,11 +60,6 @@ SCHEDULE_PROMPT = """
 • Одна таблица может содержать НЕСКОЛЬКО групп — у каждой отдельные столбцы
 • Название группы в заголовке блока (например: «Гр. П-5-24», «Гр. ПК-10-25»)
 • Времени нет на фото → time_start="" и time_end="" ВСЕГДА
-
-══════════════════ ВАЖНОЕ ПРАВИЛО: НЕ ОБЪЕДИНЯТЬ ПАРЫ ══════════════════
-Если одна и та же дисциплина идет несколько раз подряд (например, лента 1 и лента 2 — один предмет), 
-ты ОБЯЗАН создать две разные записи в JSON с разными номерами lesson_num. 
-ЗАПРЕЩЕНО объединять их в одну запись.
 
 ══════════════════ КАК ОПРЕДЕЛЯТЬ ЧЁТНЫЕ/НЕЧЁТНЫЕ НЕДЕЛИ ══════════════════
 
@@ -96,7 +99,7 @@ SCHEDULE_PROMPT = """
 ══════════════════════ МЕРОПРИЯТИЯ ══════════════════════
 «Разговоры о важном», «Внеклассное мероприятие», «Классный час», «Разговор о важном»
 → is_event=1 (добавляй в JSON, но очередь для них не создаётся)
-Все остальные занятия → is_event=0
+Все остальные занятия → is_event=0. Мероприятия всегда lesson_num: 0.
 
 ══════════════════════ ПРОПУСКАЙ ══════════════════════
 • Ячейки где обе строки пустые или оба прочерка
@@ -179,8 +182,8 @@ SCHEDULE_REVIEW_PROMPT_TEMPLATE = """
 Тебе дан черновой JSON. Исправь его, если в нём есть ошибки, и верни только JSON в ТОМ ЖЕ формате.
 
 Проверь особенно:
-1. НЕ ОБЪЕДИНЯЙ одинаковые пары, идущие подряд. Если лента 1 и 2 имеют один предмет — это ДВЕ записи.
-2. Внеклассные мероприятия и «Разговоры о важном» не считаются парой и не должны сдвигать lesson_num обычных занятий.
+1. Внеклассные мероприятия и «Разговоры о важном» не считаются парой и не должны сдвигать lesson_num обычных занятий.
+2. НЕЛЬЗЯ ОБЪЕДИНЯТЬ одинаковые подряд пары. Если у двух соседних лент одинаковые предмет, преподаватель и аудитория, это всё равно ДВЕ записи с разными lesson_num!
 3. Если в одной ленте две строки, это одна и та же пара:
    - верхняя строка = week_type 1
    - нижняя строка = week_type 2
@@ -270,7 +273,7 @@ SCHEDULE_DAY_PROMPT_TEMPLATE = """
 В этом фрагменте слева есть видимые номера пар, рядом аудитории, справа содержимое ячеек.
 
 Правила:
-1. Если цифры слева разные, это разные пары, даже если текст одинаковый. НЕ ОБЪЕДИНЯЙ ИХ.
+1. Если цифры слева разные или предметы идут один под другим — это разные пары, даже если текст одинаковый. НЕ ОБЪЕДИНЯЙ ОДИНАКОВЫЕ СТРОКИ.
 2. Если под одной цифрой внутри одной ячейки две строки, это одна пара с делением по неделям:
    - верх = week_mode "odd_even" верхняя часть
    - низ  = week_mode "odd_even" нижняя часть
@@ -730,8 +733,9 @@ def _normalize_lessons(raw_lessons: list) -> list[dict]:
 
 def _dedupe_lessons(lessons: list[dict]) -> list[dict]:
     """
-    Удаляет ПОЛНЫЕ дубликаты.
-    ВАЖНО: Теперь мы НЕ вызываем её в конце ремонта расписания, чтобы не съедать пары.
+    ВАЖНО: Я отключил вызов этой функции в конце _repair_group_lessons,
+    чтобы бот не удалял одинаковые пары подряд.
+    Оставляем функцию в коде просто для сохранения структуры.
     """
     seen = set()
     result = []
@@ -768,7 +772,7 @@ def _dedupe_lessons(lessons: list[dict]) -> list[dict]:
 def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
     """
     Улучшенная пост-обработка OCR-результата.
-    ИСПРАВЛЕНО: Удален блок, который схлопывал идущие подряд одинаковые предметы.
+    ИСПРАВЛЕНО: Блок удаления дублей удален навсегда!
     """
     by_day: dict[int, list[dict]] = {}
     for lesson in lessons:
@@ -810,7 +814,7 @@ def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
                 if old_num > 0:
                     lesson["lesson_num"] = old_num - 1
 
-        # Собираем результат БЕЗ дедупликации!
+        # 3. Возвращаем результат БЕЗ вызова функции _dedupe_lessons!
         repaired.extend(events)
         repaired.extend(regular)
 
@@ -819,7 +823,8 @@ def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
 
 def _correct_week_types_after_flat_ocr(result: dict) -> dict:
     """
-    Исправляет ошибку плоского OCR-формата.
+    Исправляет ошибку плоского OCR-формата: модель часто назначает week_type=1
+    всем одиночным парам и перепутывает верхнюю/нижнюю строки.
     """
     if not result or "groups" not in result:
         return result
@@ -844,12 +849,14 @@ def _correct_week_types_after_flat_ocr(result: dict) -> dict:
             wt1 = sum(1 for l in regular if int(l.get("week_type") or 0) == 1)
             wt2 = sum(1 for l in regular if int(l.get("week_type") or 0) == 2)
 
+            # Признак ошибки
             is_likely_wrong = (wt0 == 0 and wt1 > 0)
 
             if not is_likely_wrong:
                 fixed_all.extend(day_lessons)
                 continue
 
+            # Группируем по lesson_num
             by_num: dict = {}
             for l in regular:
                 num = int(l.get("lesson_num") or 0)
@@ -867,8 +874,9 @@ def _correct_week_types_after_flat_ocr(result: dict) -> dict:
                         int(x.get("week_type") or 0),
                         str(x.get("subject") or "")
                     ))
-                    l_lower = dict(sorted_v[0])
-                    l_upper = dict(sorted_v[1])
+                    # Исправляем week_type: верх=1, низ=2
+                    l_lower = dict(sorted_v[0])  # OCR: wt=1 (нижняя)
+                    l_upper = dict(sorted_v[1])  # OCR: wt=2 (верхняя)
                     l_lower["week_type"] = 2
                     l_upper["week_type"] = 1
                     fixed_regular.append(l_upper)
@@ -923,6 +931,9 @@ async def _review_schedule_parse(
     media_type: str,
     draft_result: dict,
 ) -> Optional[dict]:
+    """
+    Второй проход по тому же изображению.
+    """
     prompt = SCHEDULE_REVIEW_PROMPT_TEMPLATE.format(
         draft_json=json.dumps(draft_result, ensure_ascii=False, indent=2)
     )
@@ -1041,9 +1052,6 @@ async def _call_groq_text(
 async def parse_schedule_image(
     image_bytes: bytes, media_type: str = "image/jpeg"
 ) -> Optional[dict]:
-    """
-    Распознаём базовое расписание с фотографии.
-    """
     cell_result = await _call_groq_vision(
         prompt=SCHEDULE_CELL_PROMPT,
         image_bytes=image_bytes,
@@ -1077,10 +1085,6 @@ async def parse_schedule_image(
     normalized_day_crop = _normalize_schedule_result(day_crop_result) if day_crop_result else None
     _debug_dump_schedule("normalized_day_crop", normalized_day_crop)
 
-    best_candidate = normalized_cells
-    if _schedule_candidate_score(normalized_day_crop) > _schedule_candidate_score(best_candidate):
-        best_candidate = normalized_day_crop
-
     initial_result = await _call_groq_vision(
         prompt=SCHEDULE_PROMPT,
         image_bytes=image_bytes,
@@ -1102,14 +1106,16 @@ async def parse_schedule_image(
     if reviewed_result:
         result = reviewed_result
 
+    # Применяем коррекцию week_type
     normalized = _correct_week_types_after_flat_ocr(_normalize_schedule_result(result))
     _debug_dump_schedule("normalized_result", normalized)
-    if _schedule_candidate_score(normalized) > _schedule_candidate_score(best_candidate):
-        best_candidate = normalized
-
-    fallback_normalized = _correct_week_types_after_flat_ocr(_normalize_schedule_result(initial_result))
-    if _schedule_candidate_score(fallback_normalized) > _schedule_candidate_score(best_candidate):
-        best_candidate = fallback_normalized
+    
+    # Выбираем лучший
+    best_candidate = normalized
+    if _schedule_candidate_score(normalized_cells) > _schedule_candidate_score(best_candidate):
+        best_candidate = normalized_cells
+    if _schedule_candidate_score(normalized_day_crop) > _schedule_candidate_score(best_candidate):
+        best_candidate = normalized_day_crop
 
     return best_candidate
 
@@ -1146,7 +1152,7 @@ async def parse_change_text(text: str) -> Optional[dict]:
 
 
 # ─────────────────────────────────────────────
-# PARSE CHANGE (TEXT + OPTIONAL IMAGE) — для source_monitor
+# PARSE CHANGE (TEXT + OPTIONAL IMAGE)
 # ─────────────────────────────────────────────
 
 async def parse_schedule_change(
@@ -1171,7 +1177,7 @@ async def parse_schedule_change(
 
 
 # ─────────────────────────────────────────────
-# FORMAT SCHEDULE — форматирование для отображения
+# FORMAT SCHEDULE
 # ─────────────────────────────────────────────
 
 def format_schedule(lessons: list[dict]) -> str:
@@ -1184,7 +1190,7 @@ def format_schedule(lessons: list[dict]) -> str:
     lines = []
     for wd in sorted(by_day):
         lines.append(f"\n<b>📅 {days.get(wd, str(wd))}</b>")
-        for l in sorted(by_day[wd], key=lambda x: x["lesson_num"]):
+        for l in sorted(by_day[wd], key=lambda x: (x["lesson_num"], x.get("week_type", 0))):
             teacher = f" — {l['teacher']}" if l.get("teacher") else ""
             room = f" [{l['room']}]" if l.get("room") else ""
             ts = l.get("time_start") or ""
