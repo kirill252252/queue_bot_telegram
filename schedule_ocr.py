@@ -826,6 +826,89 @@ def _repair_group_lessons(lessons: list[dict]) -> list[dict]:
     return _dedupe_lessons(repaired)
 
 
+def _correct_week_types_after_flat_ocr(result: dict) -> dict:
+    """
+    Исправляет ошибку плоского OCR-формата: модель часто назначает week_type=1
+    всем одиночным парам (должно быть 0) и перепутывает верхнюю/нижнюю строки.
+
+    Алгоритм для каждого дня:
+    - Если НЕТ ни одной пары с week_type=0 → подозреваем ошибку
+    - Одиночная пара с week_type=1 без парного week_type=2 → устанавливаем 0
+    - Две пары с одним lesson_num (wt=1 и wt=2) → меняем местами
+      (OCR выдаёт верхнюю строку как wt=2, нижнюю как wt=1 — обратно правильному)
+    """
+    if not result or "groups" not in result:
+        return result
+
+    corrected_groups = []
+    for group in result.get("groups", []):
+        lessons = list(group.get("lessons", []))
+
+        # Группируем по дням
+        by_day: dict = {}
+        for l in lessons:
+            wd = int(l.get("weekday") or 0)
+            by_day.setdefault(wd, []).append(l)
+
+        fixed_all = []
+        for wd, day_lessons in sorted(by_day.items()):
+            # Только обычные занятия (не мероприятия)
+            regular = [l for l in day_lessons if not int(l.get("is_event") or 0)]
+            events  = [l for l in day_lessons if int(l.get("is_event") or 0)]
+
+            wt0 = sum(1 for l in regular if int(l.get("week_type") or 0) == 0)
+            wt1 = sum(1 for l in regular if int(l.get("week_type") or 0) == 1)
+            wt2 = sum(1 for l in regular if int(l.get("week_type") or 0) == 2)
+
+            # Признак ошибки: нет ни одного week_type=0 И много week_type=1
+            is_likely_wrong = (wt0 == 0 and wt1 > 0)
+
+            if not is_likely_wrong:
+                fixed_all.extend(day_lessons)
+                continue
+
+            # Группируем по lesson_num
+            by_num: dict = {}
+            for l in regular:
+                num = int(l.get("lesson_num") or 0)
+                by_num.setdefault(num, []).append(l)
+
+            fixed_regular = []
+            for num in sorted(by_num):
+                variants = by_num[num]
+                if len(variants) == 1:
+                    # Единственная запись — занятие каждую неделю
+                    l = dict(variants[0])
+                    l["week_type"] = 0
+                    fixed_regular.append(l)
+                elif len(variants) == 2:
+                    # Дробная пара:
+                    # OCR назначает верхней строке wt=2, нижней — wt=1 (обратно)
+                    # Сортируем по (wt, subject) → [wt=1(нижняя OCR), wt=2(верхняя OCR)]
+                    sorted_v = sorted(variants, key=lambda x: (
+                        int(x.get("week_type") or 0),
+                        str(x.get("subject") or "")
+                    ))
+                    # Меняем местами: первый (wt=1, нижняя) → wt=2(чётная)
+                    #                  второй (wt=2, верхняя) → wt=1(нечётная)
+                    l_lower = dict(sorted_v[0])  # OCR: wt=1 (нижняя строка)
+                    l_upper = dict(sorted_v[1])  # OCR: wt=2 (верхняя строка)
+                    l_lower["week_type"] = 2  # нижняя = чётная неделя
+                    l_upper["week_type"] = 1  # верхняя = нечётная неделя
+                    fixed_regular.append(l_upper)  # нечётная первой
+                    fixed_regular.append(l_lower)  # чётная второй
+                else:
+                    # 3+ вариантов — нестандартный случай, оставляем как есть
+                    fixed_regular.extend(variants)
+
+            fixed_all.extend(events)
+            fixed_all.extend(fixed_regular)
+
+        corrected_groups.append({**group, "lessons": fixed_all})
+
+    return {**result, "groups": corrected_groups}
+
+
 def _normalize_schedule_result(result: dict) -> Optional[dict]:
     if not result or not isinstance(result, dict):
         return None
@@ -1070,12 +1153,14 @@ async def parse_schedule_image(
     if reviewed_result:
         result = reviewed_result
 
-    normalized = _normalize_schedule_result(result)
+    # Применяем коррекцию week_type к результатам плоского формата
+    # (ячеечный формат уже имеет правильные week_type через _expand_schedule_cells)
+    normalized = _correct_week_types_after_flat_ocr(_normalize_schedule_result(result))
     _debug_dump_schedule("normalized_result", normalized)
     if _schedule_candidate_score(normalized) > _schedule_candidate_score(best_candidate):
         best_candidate = normalized
 
-    fallback_normalized = _normalize_schedule_result(initial_result)
+    fallback_normalized = _correct_week_types_after_flat_ocr(_normalize_schedule_result(initial_result))
     if _schedule_candidate_score(fallback_normalized) > _schedule_candidate_score(best_candidate):
         best_candidate = fallback_normalized
 
