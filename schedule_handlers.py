@@ -123,7 +123,10 @@ def _lesson_time_str(lesson: dict, bells_cache: dict) -> str:
 
 def _lesson_week_icon(lesson: dict) -> str:
     """Иконка типа недели: 1️⃣ нечётная, 2️⃣ чётная, пусто = каждую."""
-    wt = lesson.get("week_type", 0)
+    try:
+        wt = int(lesson.get("week_type") or 0)
+    except (TypeError, ValueError):
+        wt = 0
     if lesson.get("is_event"):
         return " 🎓"  # мероприятие
     return {1: " 1️⃣", 2: " 2️⃣"}.get(wt, "")
@@ -1562,7 +1565,7 @@ async def _show_filtered_week(call: CallbackQuery, week_type: int):
             # Фильтруем только нужный тип + общие занятия
             day_lessons = [
                 l for l in week[wd]
-                if l.get("week_type", 0) in (0, week_type)
+                if int(l.get("week_type") or 0) in (0, week_type)
                 and not l.get("is_event")
             ]
             if not day_lessons:
