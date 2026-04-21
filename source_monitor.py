@@ -18,6 +18,7 @@ import re
 from aiogram import Bot
 
 import schedule_db as sdb
+from schedule_group_match import build_group_lookup, resolve_target_groups
 from schedule_parser import parse_schedule_change
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,7 @@ async def check_telegram_source(bot: Bot, source: dict, chat_id: int):
         if not groups:
             return new_last_id
 
-        group_map = {g["group_name"].lower(): g for g in groups}
+        group_lookup = build_group_lookup(groups)
 
         for pid, block_html in post_blocks:
             if last_post_id and int(pid) <= int(last_post_id):
@@ -124,8 +125,14 @@ async def check_telegram_source(bot: Bot, source: dict, chat_id: int):
 
             for change in result["changes"]:
                 # Определяем целевые группы: по названию или все группы чата
-                gname   = (change.get("group") or "").strip().lower()
-                targets = [group_map[gname]] if gname and gname in group_map else groups
+                targets = resolve_target_groups(change, groups, group_lookup)
+                if not targets:
+                    if change.get("group"):
+                        logger.warning(
+                            "Telegram change skipped: unknown group %r",
+                            change.get("group"),
+                        )
+                    continue
 
                 for g in targets:
                     await sdb.save_override(g["id"], change, fallback_date=fallback_date)
@@ -203,7 +210,7 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
         if not groups:
             return latest_id
 
-        group_map = {g["group_name"].lower(): g for g in groups}
+        group_lookup = build_group_lookup(groups)
 
         # Обрабатываем от старых к новым
         items_sorted = sorted(items, key=lambda x: x["id"])
@@ -215,9 +222,10 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
                 continue
 
             text = item.get("text", "").strip()
+            has_photo = any(att.get("type") == "photo" for att in item.get("attachments", []))
 
             # Расширенный список ключевых слов
-            if not any(k in text.lower() for k in _CHANGE_KEYWORDS + ["лент", "пар "]):
+            if not any(k in text.lower() for k in _CHANGE_KEYWORDS + ["лент", "пар "]) and not has_photo:
                 continue
 
             # Скачиваем первую фотографию если есть
@@ -242,9 +250,14 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
             applied = []
 
             for change in result["changes"]:
-                # BUG FIX: определяем целевую группу, а не применяем ко всем
-                gname   = (change.get("group") or "").strip().lower()
-                targets = [group_map[gname]] if gname and gname in group_map else groups
+                targets = resolve_target_groups(change, groups, group_lookup)
+                if not targets:
+                    if change.get("group"):
+                        logger.warning(
+                            "VK change skipped: unknown group %r",
+                            change.get("group"),
+                        )
+                    continue
 
                 for g in targets:
                     await sdb.save_override(g["id"], change, fallback_date=fallback_date)
@@ -284,7 +297,7 @@ async def close_session():
 # LOOP
 # ─────────────────────────────────────────────
 
-async def source_monitor_loop(bot: Bot, interval_minutes: int = 360):
+async def source_monitor_loop(bot: Bot, interval_minutes: int = 15):
     """
     Основной цикл мониторинга.
     По умолчанию запускается каждые 6 часов (360 минут) —

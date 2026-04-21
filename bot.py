@@ -7,8 +7,15 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import (
-    BOT_TOKEN, BOT_MODE, WEBHOOK_HOST, WEBHOOK_PATH, WEBHOOK_PORT,
-    WEB_PANEL_ENABLED, WEB_PANEL_PORT, DB_TYPE
+    BOT_TOKEN,
+    BOT_MODE,
+    WEBHOOK_HOST,
+    WEBHOOK_PATH,
+    WEBHOOK_PORT,
+    WEB_PANEL_ENABLED,
+    WEB_PANEL_PORT,
+    DB_TYPE,
+    SOURCE_MONITOR_INTERVAL_MIN,
 )
 
 import db
@@ -22,18 +29,12 @@ from source_monitor import source_monitor_loop
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────
-# БАЗА ДАННЫХ (FIXED)
-# ─────────────────────────────
-# ─────────────────────────────
-# BACKGROUND LOOP (ЕДИНЫЙ)
-# ─────────────────────────────
 async def background_loop(bot: Bot):
     while True:
         try:
@@ -45,9 +46,6 @@ async def background_loop(bot: Bot):
         await asyncio.sleep(60)
 
 
-# ─────────────────────────────
-# WEB PANEL
-# ─────────────────────────────
 async def start_web_panel():
     if not WEB_PANEL_ENABLED:
         return
@@ -60,7 +58,7 @@ async def start_web_panel():
             panel_app,
             host="0.0.0.0",
             port=WEB_PANEL_PORT,
-            log_level="warning"
+            log_level="warning",
         )
 
         server = uvicorn.Server(config)
@@ -72,13 +70,9 @@ async def start_web_panel():
         logger.warning("Web panel disabled (uvicorn/fastapi missing)")
 
 
-# ─────────────────────────────
-# MAIN
-# ─────────────────────────────
 async def main():
-
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        logger.error("BOT_TOKEN не задан!")
+        logger.error("BOT_TOKEN not set")
         sys.exit(1)
 
     logger.info("Using %s database", "PostgreSQL" if DB_TYPE == "postgres" else "SQLite")
@@ -90,22 +84,19 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
-
     dp["bot"] = bot
 
-    # routers
     dp.include_router(router)
     dp.include_router(sched_router)
 
-    # background tasks (ОДИН цикл вместо 2–3)
     tasks = [
         asyncio.create_task(background_loop(bot), name="background_loop"),
-        asyncio.create_task(source_monitor_loop(bot, interval_minutes=360), name="source_monitor_loop"),  # раз в 6 часов
+        asyncio.create_task(
+            source_monitor_loop(bot, interval_minutes=SOURCE_MONITOR_INTERVAL_MIN),
+            name="source_monitor_loop",
+        ),
     ]
 
-    # ─────────────────────────────
-    # WEBHOOK MODE
-    # ─────────────────────────────
     try:
         await start_web_panel()
 
@@ -120,11 +111,7 @@ async def main():
 
             app = web.Application()
 
-            SimpleRequestHandler(
-                dispatcher=dp,
-                bot=bot
-            ).register(app, path=WEBHOOK_PATH)
-
+            SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
             setup_application(app, dp, bot=bot)
 
             runner = web.AppRunner(app)
@@ -134,12 +121,7 @@ async def main():
             await site.start()
 
             logger.info(f"Webhook server on :{WEBHOOK_PORT}")
-
             await asyncio.Event().wait()
-
-    # ─────────────────────────────
-    # POLLING MODE
-    # ─────────────────────────────
         else:
             await bot.delete_webhook(drop_pending_updates=True)
             await dp.start_polling(
@@ -148,8 +130,8 @@ async def main():
                     "message",
                     "callback_query",
                     "my_chat_member",
-                    "chat_member"
-                ]
+                    "chat_member",
+                ],
             )
     finally:
         for task in tasks:
@@ -161,8 +143,5 @@ async def main():
         await bot.session.close()
 
 
-# ─────────────────────────────
-# ENTRYPOINT
-# ─────────────────────────────
 if __name__ == "__main__":
     asyncio.run(main())

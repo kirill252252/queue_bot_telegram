@@ -22,12 +22,7 @@ def _now() -> datetime:
     Railway/VPS работают на UTC — без смещения очереди не откроются в нужное время.
     Добавьте в .env: TZ_OFFSET=4 (для UTC+4)
     """
-    try:
-        from config import TZ_OFFSET
-        offset = timedelta(hours=TZ_OFFSET)
-    except Exception:
-        offset = timedelta(0)
-    return datetime.now(timezone.utc) + offset
+    return sdb.get_local_now()
 
 
 # ─────────────────────────────────────────────
