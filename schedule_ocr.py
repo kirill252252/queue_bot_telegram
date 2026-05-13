@@ -411,14 +411,18 @@ def _detect_content_bounds(image_bytes: bytes) -> Optional[tuple[int, int]]:
 
 def _crop_image_bytes(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes:
     image = Image.open(BytesIO(image_bytes))
+    # Force full decode NOW, before any crop.
+    # PIL opens JPEGs lazily; skipping this causes _encode_tile to crash
+    # with "tile cannot extend outside image" when saving to a BytesIO.
+    image.load()
     w, h = image.size
     left, top, right, bottom = box
-    # Clamp coordinates to image dimensions to prevent PIL's
-    # "tile cannot extend outside image" SystemError.
+    # Clamp to valid pixel coordinates so the detector's approximate line
+    # positions never exceed the actual image dimensions.
     safe_box = (
-        max(0, min(left, w)),
-        max(0, min(top, h)),
-        max(0, min(right, w)),
+        max(0, min(left,   w)),
+        max(0, min(top,    h)),
+        max(0, min(right,  w)),
         max(0, min(bottom, h)),
     )
     cropped = image.crop(safe_box)
