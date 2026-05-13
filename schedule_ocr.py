@@ -155,7 +155,21 @@ SCHEDULE_REVIEW_PROMPT_TEMPLATE = """
 SCHEDULE_CELL_PROMPT = """
 Ты анализируешь расписание занятий с изображения.
 
-Сначала определи ЯЧЕЙКИ по видимому номеру пары в колонке «лента», а не плоский список предметов.
+═══════════════ СТРУКТУРА ТАБЛИЦЫ ═══════════════
+Таблица имеет колонки слева направо:
+  1. «День» — день недели написан ВЕРТИКАЛЬНО: ПОНЕДЕЛЬНИК, ВТОРНИК, СРЕДА, ЧЕТВЕРГ, ПЯТНИЦА
+  2. «дата» — дата (игнорируй)
+  3. «Ауд.» — номер аудитории (room)
+  4. Содержимое ячейки: название предмета и преподаватель
+
+Слева от каждой строки с занятием в отдельной колонке стоит ЦИФРА — это номер ПАРЫ (lesson_num), не номер дня!
+
+ВАЖНО: weekday (день недели) читай из вертикальной подписи «День», а НЕ из колонки с цифрами!
+  Понедельник → weekday: 1
+  Вторник → weekday: 2
+  Среда → weekday: 3
+  Четверг → weekday: 4
+  Пятница → weekday: 5
 
 ═══════════════ ГЛАВНЫЕ ПРАВИЛА ═══════════════
 ПРАВИЛО 1 — РАЗНЫЕ ЦИФРЫ В ЛЕНТЕ = РАЗНЫЕ ПАРЫ:
@@ -182,16 +196,16 @@ SCHEDULE_CELL_PROMPT = """
   Лента 1: "Разработка программных модулей / Петрова АА [С-6]"
   Лента 2: "Разработка программных модулей / Петрова АА [С-6]"
   → СОЗДАЙ ДВЕ ячейки:
-    {"lesson_num": 1, "week_mode": "every_week", "top": {"subject": "Разработка программных модулей", "teacher": "Петрова АА", "room": "С-6"}}
-    {"lesson_num": 2, "week_mode": "every_week", "top": {"subject": "Разработка программных модулей", "teacher": "Петрова АА", "room": "С-6"}}
+    {"weekday": 2, "lesson_num": 1, "week_mode": "every_week", "top": {"subject": "Разработка программных модулей", "teacher": "Петрова АА", "room": "С-6"}}
+    {"weekday": 2, "lesson_num": 2, "week_mode": "every_week", "top": {"subject": "Разработка программных модулей", "teacher": "Петрова АА", "room": "С-6"}}
 
 ПРИМЕР 2: Понедельник — лента 2 разделена по неделям
   Лента 1: "Инструментальные средства разработки / Наприенко ЕМ [509]"  (одна строка)
   Лента 2: Верх = "Инструментальные средства разработки / Наприенко ЕМ [509]"
            Низ  = "Программирование web-приложений / Вахитов РГ [410]"
   → ДВЕ ячейки:
-    {"lesson_num": 1, "week_mode": "every_week", "top": {"subject": "Инструментальные средства разработки программного обеспечения", "teacher": "Наприенко ЕМ", "room": "509"}, "bottom": null}
-    {"lesson_num": 2, "week_mode": "odd_even",
+    {"weekday": 1, "lesson_num": 1, "week_mode": "every_week", "top": {"subject": "Инструментальные средства разработки программного обеспечения", "teacher": "Наприенко ЕМ", "room": "509"}, "bottom": null}
+    {"weekday": 1, "lesson_num": 2, "week_mode": "odd_even",
      "top":    {"subject": "Инструментальные средства разработки программного обеспечения", "teacher": "Наприенко ЕМ", "room": "509"},
      "bottom": {"subject": "Программирование web-приложений", "teacher": "Вахитов РГ", "room": "410"}}
 
@@ -199,8 +213,8 @@ SCHEDULE_CELL_PROMPT = """
   Лента 1: пустой верх, низ = "Математическое моделирование / Мережникова ЕМ [404]"
   Лента 5: верх = "Иностранный язык в проф. деятельности / Данилова АА [Л610]", пустой низ
   → ДВЕ ячейки:
-    {"lesson_num": 1, "week_mode": "even_only", "top": null, "bottom": {"subject": "Математическое моделирование", "teacher": "Мережникова ЕМ", "room": "404"}}
-    {"lesson_num": 5, "week_mode": "odd_only", "top": {"subject": "Иностранный язык в профессиональной деятельности", "teacher": "Данилова АА", "room": "Л610"}, "bottom": null}
+    {"weekday": 3, "lesson_num": 1, "week_mode": "even_only", "top": null, "bottom": {"subject": "Математическое моделирование", "teacher": "Мережникова ЕМ", "room": "404"}}
+    {"weekday": 3, "lesson_num": 5, "week_mode": "odd_only", "top": {"subject": "Иностранный язык в профессиональной деятельности", "teacher": "Данилова АА", "room": "Л610"}, "bottom": null}
 
 ═══════════════ ФОРМАТ ОТВЕТА ═══════════════
 Верни только JSON:
@@ -1065,10 +1079,13 @@ async def parse_schedule_image(
     )
     _debug_dump_schedule("day_crop_result", day_crop_result)
     normalized_day_crop = _normalize_schedule_result(day_crop_result) if day_crop_result else None
-    
-    if normalized_day_crop:
-        if not best_candidate or _schedule_candidate_score(normalized_day_crop) > _schedule_candidate_score(best_candidate):
-            best_candidate = normalized_day_crop
+
+    # Day-crop is used ONLY as last resort: band boundaries often produce
+    # off-by-one weekday assignments, inflating the score purely via weekday
+    # count while having wrong day assignments. Trust the whole-image cell
+    # result over the cropped fragments.
+    if normalized_day_crop and not best_candidate:
+        best_candidate = normalized_day_crop
 
     initial_result = await _call_groq_vision(
         prompt=SCHEDULE_PROMPT,

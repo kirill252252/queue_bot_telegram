@@ -251,13 +251,13 @@ async def fsm_receive_schedule_photo(message: Message, state: FSMContext):
 
     preview_lessons = groups_data[0].get("lessons", [])
     even_lessons, odd_lessons = split_by_week(preview_lessons)
+    odd_text  = format_schedule(odd_lessons)
     even_text = format_schedule(even_lessons)
-    odd_text = format_schedule(odd_lessons)
     preview = (
-        "📅 <b>Чётная неделя</b>\n"
-        f"{even_text}\n\n"
-        "📅 <b>Нечётная неделя</b>\n"
-        f"{odd_text}"
+        "📅 <b>Первая неделя (нечётная)</b>\n"
+        f"{odd_text}\n\n"
+        "📅 <b>Вторая неделя (чётная)</b>\n"
+        f"{even_text}"
     )
 
     await status_msg.edit_text(
