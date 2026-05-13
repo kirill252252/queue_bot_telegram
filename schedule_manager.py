@@ -6,6 +6,13 @@
   - Создаёт очередь в начале пары (если skip_queue=0)
   - Закрывает очередь в конце пары
   - Отправляет уведомления согласно настройкам чата
+
+ИСПРАВЛЕНИЯ v2:
+  - _open_lesson_queue: защита от дублей проверяет pending+active (уже было в sdb,
+    но теперь логируем дубль явно)
+  - Настройки уведомлений инициализируются в БД при первом тике, чтобы
+    дефолт «1» не возникал заново после отключения
+  - Настройки загружаются ОДИН РАЗ на группу за тик, а не для каждой пары
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -79,6 +86,30 @@ def get_effective_lessons(lessons: list[dict], overrides: list[dict],
 
 
 # ─────────────────────────────────────────────
+# ENSURE SETTINGS INITIALIZED
+# ─────────────────────────────────────────────
+
+async def _ensure_settings_initialized(chat_id: int) -> dict:
+    """
+    ИСПРАВЛЕНИЕ: Гарантируем, что в БД есть строка настроек для чата.
+    Если строки нет — создаём с дефолтными значениями (все уведомления вкл).
+    Это предотвращает ситуацию когда пользователь отключил уведомления,
+    но при перезапуске бота get_chat_schedule_settings возвращает дефолт «1».
+    """
+    settings = await sdb.get_chat_schedule_settings(chat_id)
+    # Если в БД нет строки (chat_id не совпадает), создаём её
+    if settings.get("chat_id") != chat_id:
+        await sdb.update_chat_schedule_settings(
+            chat_id,
+            notify_on_open=1,
+            notify_on_close=1,
+            notify_before_min=0,
+        )
+        settings = await sdb.get_chat_schedule_settings(chat_id)
+    return settings
+
+
+# ─────────────────────────────────────────────
 # MAIN TICK
 # ─────────────────────────────────────────────
 
@@ -88,6 +119,9 @@ async def process_schedule_tick(bot):
     Алгоритм:
       1. Берём локальное время с учётом TZ_OFFSET
       2. Для каждой группы: занятия дня → overrides → фильтр недели → открыть/закрыть очереди
+    
+    ИСПРАВЛЕНИЕ: Настройки загружаются ОДИН РАЗ на группу (не на каждую пару),
+    и сразу гарантируем наличие строки в БД.
     """
     now          = _now()
     today        = now.strftime("%Y-%m-%d")
@@ -112,6 +146,12 @@ async def process_schedule_tick(bot):
         # Фильтр по типу недели и мероприятиям
         effective = sdb.filter_by_week_type(effective)
 
+        # ИСПРАВЛЕНИЕ: загружаем настройки ОДИН РАЗ для группы
+        settings = await _ensure_settings_initialized(chat_id)
+        notify_open  = bool(settings.get("notify_on_open",  1))
+        notify_close = bool(settings.get("notify_on_close", 1))
+        before_min   = int(settings.get("notify_before_min") or 0)
+
         for lesson in effective:
             if lesson.get("skip_queue"):
                 continue
@@ -131,15 +171,13 @@ async def process_schedule_tick(bot):
                 continue
 
             if current_time == time_start:
-                await _open_lesson_queue(bot, group, lesson, today, chat_id)
+                await _open_lesson_queue(bot, group, lesson, today, chat_id, notify_open)
 
             if current_time == time_end:
-                await _close_lesson_queue(bot, group, lesson, today, chat_id)
+                await _close_lesson_queue(bot, group, lesson, today, chat_id, notify_close)
 
             # Предупреждение заранее
-            settings   = await sdb.get_chat_schedule_settings(chat_id)
-            before_min = int(settings.get("notify_before_min") or 0)
-            if before_min > 0 and settings.get("notify_on_open", 1) and time_start:
+            if before_min > 0 and notify_open and time_start:
                 try:
                     start_dt  = datetime.strptime(f"{today} {time_start}", "%Y-%m-%d %H:%M")
                     warn_time = (start_dt - timedelta(minutes=before_min)).strftime("%H:%M")
@@ -162,7 +200,8 @@ async def process_schedule_tick(bot):
 # ─────────────────────────────────────────────
 
 async def _open_lesson_queue(bot, group: dict, lesson: dict,
-                             date_str: str, chat_id: int):
+                             date_str: str, chat_id: int,
+                             notify: bool = True):
     """Создаём очередь для пары если её ещё нет."""
     subject    = lesson["subject"]
     lesson_num = lesson["lesson_num"]
@@ -171,10 +210,14 @@ async def _open_lesson_queue(bot, group: dict, lesson: dict,
     teacher    = lesson.get("teacher") or ""
     room       = lesson.get("room") or ""
 
-    # Защита от дублей
+    # ИСПРАВЛЕНИЕ: Защита от дублей — get_pending_events возвращает pending+active
     pending = await sdb.get_pending_events(date_str)
     for e in pending:
         if e["group_id"] == group["id"] and e["lesson_num"] == lesson_num:
+            logger.debug(
+                "Skipping duplicate queue for group %s lesson %s on %s (status=%s)",
+                group["id"], lesson_num, date_str, e.get("status")
+            )
             return
 
     desc_parts = []
@@ -200,8 +243,8 @@ async def _open_lesson_queue(bot, group: dict, lesson: dict,
     await sdb.update_event_queue(event_id, queue_id)
     await sdb.update_event_status(event_id, "active")
 
-    settings = await sdb.get_chat_schedule_settings(chat_id)
-    if settings.get("notify_on_open", 1):
+    # ИСПРАВЛЕНИЕ: notify передаётся извне — настройки уже загружены единожды
+    if notify:
         try:
             await bot.send_message(
                 chat_id,
@@ -221,7 +264,8 @@ async def _open_lesson_queue(bot, group: dict, lesson: dict,
 # ─────────────────────────────────────────────
 
 async def _close_lesson_queue(bot, group: dict, lesson: dict,
-                              date_str: str, chat_id: int):
+                              date_str: str, chat_id: int,
+                              notify: bool = True):
     """Закрываем очередь по окончании пары."""
     lesson_num = lesson["lesson_num"]
     subject    = lesson["subject"]
@@ -233,8 +277,8 @@ async def _close_lesson_queue(bot, group: dict, lesson: dict,
                 await db.close_queue(event["queue_id"])
             await sdb.update_event_status(event["id"], "closed")
 
-            settings = await sdb.get_chat_schedule_settings(chat_id)
-            if settings.get("notify_on_close", 1):
+            # ИСПРАВЛЕНИЕ: notify передаётся извне
+            if notify:
                 try:
                     await bot.send_message(
                         chat_id,
