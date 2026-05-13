@@ -1565,51 +1565,71 @@ async def cb_show_even_week(call: CallbackQuery):
 
 
 async def _show_filtered_week(call: CallbackQuery, week_type: int):
-    """Показывает расписание недели с фильтром по типу (нечётная/чётная)."""
+    """Показывает расписание недели в плоском текстовом формате (как в примере)."""
     chat_id = call.message.chat.id
-    groups  = await sdb.get_chat_groups(chat_id)
+    groups = await sdb.get_chat_groups(chat_id)
     if not groups:
         await call.answer("Расписание не загружено.", show_alert=True)
         return
 
-    bells_cache = {b["lesson_num"]: b for b in await sdb.get_bells(chat_id)}
-    week_name   = "Нечётная неделя 1️⃣" if week_type == 1 else "Чётная неделя 2️⃣"
+    week_title = "Первая неделя" if week_type == 1 else "Вторая неделя"
 
-    parts = []
+    def _day_title(wd: int) -> str:
+        return DAYS_FULL.get(wd, str(wd))
+
+    parts: list[str] = []
     for group in groups:
         week = await get_week_schedule(group["id"])
         if not week:
             continue
 
-        lines = [f"📅 <b>{group['group_name']} — {week_name}</b>"]
-        for wd in sorted(week):
-            # Фильтруем: нужный тип недели + общие + мероприятия (is_event всегда показываем)
-            # Фильтруем: мероприятия (всегда) + пары нужного типа недели
+        out_lines: list[str] = [f"{week_title} ({group['group_name']})"]
+
+        for wd in range(1, 8):
+            if wd not in week:
+                continue
+
             day_lessons = [
                 l for l in week[wd]
                 if (
-                    l.get("is_event")                               # мероприятия показываем всегда
-                    or int(l.get("week_type") or 0) in (0, week_type)  # пары этой недели + общие
+                    int(l.get("is_event") or 0) == 1
+                    or int(l.get("week_type") or 0) in (0, week_type)
                 )
             ]
             if not day_lessons:
                 continue
-            lines.append(f"\n<b>{DAYS_FULL.get(wd, wd)}</b>")
-            for l in sorted(day_lessons, key=lambda x: (0 if x.get("is_event") else 1,
-                                                         x.get("lesson_num", 0))):
-                teacher = f" — {l['teacher']}" if l.get("teacher") else ""
-                room    = f" [{l['room']}]" if l.get("room") else ""
-                time_s  = _lesson_time_str(l, bells_cache)
-                ev_s    = " 🎓" if l.get("is_event") else ""
-                lines.append(f"  {l['lesson_num']}.{time_s} <b>{l['subject']}</b>{teacher}{room}{ev_s}")
-        parts.append("\n".join(lines))
+
+            # Сначала мероприятие (lesson_num=0), потом обычные пары
+            day_lessons_sorted = sorted(
+                day_lessons,
+                key=lambda x: (0 if int(x.get("is_event") or 0) == 1 else 1, int(x.get("lesson_num") or 0)),
+            )
+
+            # Плоский формат без времени (в твоём примере оно отсутствует)
+            # Пример строки: "Понедельник 0. Разговоры о важном — Табаченко И.К."
+            day_prefix = _day_title(wd)
+            for i, l in enumerate(day_lessons_sorted):
+                lesson_num = int(l.get("lesson_num") or 0)
+                subject = l.get("subject") or ""
+                teacher = l.get("teacher") or ""
+                teacher_part = f" — {teacher}" if teacher else ""
+                room_part = f" [{l['room']}]" if l.get("room") else ""
+
+                # На уровне "как в примере": первая строка дня начинается с названия дня.
+                # Остальные строки дня идут с отступом.
+                if i == 0:
+                    out_lines.append(f"{day_prefix} {lesson_num}. {subject}{teacher_part}{room_part}")
+                else:
+                    out_lines.append(f"  {lesson_num}. {subject}{teacher_part}{room_part}")
+
+        parts.append("\n".join(out_lines))
 
     if not parts:
         await call.answer("Нет занятий.", show_alert=True)
         return
 
     for chunk in parts:
-        await call.message.answer(chunk, parse_mode="HTML")
+        await call.message.answer(chunk, parse_mode=None)
     await call.answer()
 
 
