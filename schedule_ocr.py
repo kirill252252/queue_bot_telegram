@@ -411,7 +411,17 @@ def _detect_content_bounds(image_bytes: bytes) -> Optional[tuple[int, int]]:
 
 def _crop_image_bytes(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes:
     image = Image.open(BytesIO(image_bytes))
-    cropped = image.crop(box)
+    w, h = image.size
+    left, top, right, bottom = box
+    # Clamp coordinates to image dimensions to prevent PIL's
+    # "tile cannot extend outside image" SystemError.
+    safe_box = (
+        max(0, min(left, w)),
+        max(0, min(top, h)),
+        max(0, min(right, w)),
+        max(0, min(bottom, h)),
+    )
+    cropped = image.crop(safe_box)
     output = BytesIO()
     cropped.save(output, format="PNG")
     return output.getvalue()
