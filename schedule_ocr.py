@@ -410,20 +410,21 @@ def _detect_content_bounds(image_bytes: bytes) -> Optional[tuple[int, int]]:
 
 
 def _crop_image_bytes(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes:
-    # convert("RGB") forces a full JPEG decode and produces a clean, contiguous
-    # pixel buffer. Without it, PIL keeps a lazy internal view whose im.im
-    # dimensions can diverge from im.size, making _encode_tile crash with
-    # "tile cannot extend outside image" when saving to a BytesIO.
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     w, h = image.size
     left, top, right, bottom = box
-    safe_box = (
-        max(0, min(left,   w)),
-        max(0, min(top,    h)),
-        max(0, min(right,  w)),
-        max(0, min(bottom, h)),
-    )
-    cropped = image.crop(safe_box)
+    # Clamp to image dimensions
+    l = max(0, min(left,   w))
+    t = max(0, min(top,    h))
+    r = max(0, min(right,  w))
+    b = max(0, min(bottom, h))
+    # Crop through numpy instead of PIL.crop().
+    # PIL.crop() returns a lazy object whose internal im.im buffer can stay
+    # mismatched with im.size, causing _encode_tile → SystemError when saving
+    # to a BytesIO. Image.fromarray() always produces a clean, fully-allocated
+    # pixel buffer with no lazy state.
+    arr = np.array(image)[t:b, l:r]
+    cropped = Image.fromarray(arr, mode="RGB")
     output = BytesIO()
     cropped.save(output, format="PNG")
     return output.getvalue()
