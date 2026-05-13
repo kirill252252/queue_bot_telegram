@@ -374,13 +374,18 @@ def _detect_day_bands(image_bytes: bytes) -> list[tuple[int, int, int]]:
     if len(clusters) < 5:
         return []
 
-    clusters = clusters[:5]
+    # Each day band spans from the bottom of one cluster boundary to the
+    # bottom of the next. Add image height as sentinel so the last day has
+    # a valid bottom. This avoids the old bug where band-1 was
+    # (clusters[0][0], clusters[0][-1]) — a zero-height crop when the
+    # cluster has a single point.
+    band_ends = [c[-1] for c in clusters[:5]] + [height]
     day_bands = []
-    day_start = clusters[0][0]
-    for weekday, cluster in enumerate(clusters, start=1):
-        day_end = cluster[-1]
-        day_bands.append((weekday, day_start, day_end))
-        day_start = day_end
+    for weekday in range(1, 6):
+        top = band_ends[weekday - 1]
+        bottom = band_ends[weekday]
+        if bottom - top > 5:          # skip degenerate bands
+            day_bands.append((weekday, top, bottom))
 
     return day_bands
 
@@ -409,21 +414,19 @@ def _detect_content_bounds(image_bytes: bytes) -> Optional[tuple[int, int]]:
     return left, right
 
 
-def _crop_image_bytes(image_bytes: bytes, box: tuple[int, int, int, int]) -> bytes:
+def _crop_image_bytes(image_bytes: bytes, box: tuple[int, int, int, int]) -> Optional[bytes]:
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     w, h = image.size
     left, top, right, bottom = box
-    # Clamp to image dimensions
     l = max(0, min(left,   w))
     t = max(0, min(top,    h))
     r = max(0, min(right,  w))
     b = max(0, min(bottom, h))
-    # Crop through numpy instead of PIL.crop().
-    # PIL.crop() returns a lazy object whose internal im.im buffer can stay
-    # mismatched with im.size, causing _encode_tile → SystemError when saving
-    # to a BytesIO. Image.fromarray() always produces a clean, fully-allocated
-    # pixel buffer with no lazy state.
+    if r <= l or b <= t:
+        return None
     arr = np.array(image)[t:b, l:r]
+    if arr.size == 0:
+        return None
     cropped = Image.fromarray(arr, mode="RGB")
     output = BytesIO()
     cropped.save(output, format="PNG")
@@ -446,6 +449,10 @@ async def _parse_schedule_by_day_crops(
 
     for weekday, top, bottom in day_bands:
         crop_bytes = _crop_image_bytes(image_bytes, (left, top, right, bottom))
+        if not crop_bytes:
+            logger.warning("schedule_ocr: skipping degenerate crop weekday=%d box=(%d,%d,%d,%d)",
+                           weekday, left, top, right, bottom)
+            continue
         prompt = SCHEDULE_DAY_PROMPT_TEMPLATE.format(
             day_name=DAY_NAMES.get(weekday, str(weekday)),
             weekday=weekday,
