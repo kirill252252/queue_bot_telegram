@@ -122,6 +122,10 @@ async def init_db():
             except Exception:
                 pass
         try:
+            await db.execute("ALTER TABLE known_chats ADD COLUMN timezone TEXT")
+        except Exception:
+            pass
+        try:
             await db.execute("ALTER TABLE queue_members ADD COLUMN frozen_until TIMESTAMP")
         except Exception:
             pass
@@ -140,6 +144,22 @@ async def register_chat(chat_id: int, title: str):
             ON CONFLICT(chat_id) DO UPDATE SET title = excluded.title
         """, (chat_id, title))
         await db.commit()
+
+
+async def set_chat_timezone(chat_id: int, tz_name: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE known_chats SET timezone = ? WHERE chat_id = ?",
+            (tz_name, chat_id))
+        await db.commit()
+
+
+async def get_chat_timezone(chat_id: int) -> Optional[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT timezone FROM known_chats WHERE chat_id = ?", (chat_id,))
+        row = await cur.fetchone()
+        return row[0] if row and row[0] else None
 
 
 async def get_known_chats() -> list[dict]:
@@ -723,4 +743,4 @@ async def register_user_chat(user_id: int, chat_id: int):
                 (user_id, chat_id))
             await db.commit()
         except Exception:
-            pass    
+            pass

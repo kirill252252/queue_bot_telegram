@@ -174,6 +174,169 @@ async def cmd_help(message: Message):
         parse_mode="HTML"
     )
 
+@router.message(Command("timezone"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_timezone(message: Message):
+    """Установить часовой пояс группы по названию города. Только для админов."""
+    if not await is_admin(message.bot, message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы могут менять часовой пояс.")
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        current_tz = await db.get_chat_timezone(message.chat.id)
+        tz_info = f"Текущий: <b>{current_tz}</b>" if current_tz else "Не установлен."
+        await message.answer(
+            "🌍 <b>Часовой пояс группы</b>\n\n"
+            f"{tz_info}\n\n"
+            "Использование: <code>/timezone Москва</code>\n"
+            "Примеры городов: Москва, Берлин, Лондон, Токио, Нью-Йорк, Киев, Минск",
+            parse_mode="HTML"
+        )
+        return
+
+    city = args[1].strip()
+
+    try:
+        from geopy.geocoders import Nominatim
+        from timezonefinder import TimezoneFinder
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+
+        def _resolve():
+            geolocator = Nominatim(user_agent="queue_bot_tz")
+            location = geolocator.geocode(city, language="ru", timeout=5)
+            if not location:
+                return None, None
+            tf = TimezoneFinder()
+            tz = tf.timezone_at(lat=location.latitude, lng=location.longitude)
+            return tz, location.address
+
+        tz_name, address = await loop.run_in_executor(None, _resolve)
+
+        if not tz_name:
+            await message.answer(
+                f"❌ Не удалось найти город <b>{city}</b>.\n\n"
+                "Попробуй написать название на русском или английском: "
+                "<code>/timezone Moscow</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        await db.set_chat_timezone(message.chat.id, tz_name)
+        await message.answer(
+            f"✅ Часовой пояс группы установлен!\n\n"
+            f"🌍 Город: <b>{address}</b>\n"
+            f"🕐 Часовой пояс: <b>{tz_name}</b>",
+            parse_mode="HTML"
+        )
+
+    except ImportError:
+        # geopy/timezonefinder не установлены — fallback на ручной ввод TZ
+        import zoneinfo
+        import zoneinfo as zi
+
+        # Попробуем сопоставить популярные русские названия городов вручную
+        CITY_TO_TZ: dict[str, str] = {
+            "москва": "Europe/Moscow",
+            "moscow": "Europe/Moscow",
+            "санкт-петербург": "Europe/Moscow",
+            "питер": "Europe/Moscow",
+            "спб": "Europe/Moscow",
+            "киев": "Europe/Kiev",
+            "kiev": "Europe/Kiev",
+            "kyiv": "Europe/Kiev",
+            "минск": "Europe/Minsk",
+            "minsk": "Europe/Minsk",
+            "берлин": "Europe/Berlin",
+            "berlin": "Europe/Berlin",
+            "лондон": "Europe/London",
+            "london": "Europe/London",
+            "париж": "Europe/Paris",
+            "paris": "Europe/Paris",
+            "нью-йорк": "America/New_York",
+            "new york": "America/New_York",
+            "токио": "Asia/Tokyo",
+            "tokyo": "Asia/Tokyo",
+            "пекин": "Asia/Shanghai",
+            "beijing": "Asia/Shanghai",
+            "дубай": "Asia/Dubai",
+            "dubai": "Asia/Dubai",
+            "стамбул": "Europe/Istanbul",
+            "istanbul": "Europe/Istanbul",
+            "варшава": "Europe/Warsaw",
+            "warsaw": "Europe/Warsaw",
+            "рига": "Europe/Riga",
+            "riga": "Europe/Riga",
+            "вильнюс": "Europe/Vilnius",
+            "vilnius": "Europe/Vilnius",
+            "таллин": "Europe/Tallinn",
+            "tallinn": "Europe/Tallinn",
+            "алматы": "Asia/Almaty",
+            "almaty": "Asia/Almaty",
+            "ташкент": "Asia/Tashkent",
+            "tashkent": "Asia/Tashkent",
+            "бишкек": "Asia/Bishkek",
+            "bishkek": "Asia/Bishkek",
+            "баку": "Asia/Baku",
+            "baku": "Asia/Baku",
+            "ереван": "Asia/Yerevan",
+            "yerevan": "Asia/Yerevan",
+            "тбилиси": "Asia/Tbilisi",
+            "tbilisi": "Asia/Tbilisi",
+            "екатеринбург": "Asia/Yekaterinburg",
+            "yekaterinburg": "Asia/Yekaterinburg",
+            "новосибирск": "Asia/Novosibirsk",
+            "novosibirsk": "Asia/Novosibirsk",
+            "красноярск": "Asia/Krasnoyarsk",
+            "krasnoyarsk": "Asia/Krasnoyarsk",
+            "иркутск": "Asia/Irkutsk",
+            "irkutsk": "Asia/Irkutsk",
+            "владивосток": "Asia/Vladivostok",
+            "vladivostok": "Asia/Vladivostok",
+            "калининград": "Europe/Kaliningrad",
+            "kaliningrad": "Europe/Kaliningrad",
+            "самара": "Europe/Samara",
+            "samara": "Europe/Samara",
+        }
+
+        key = city.lower().strip()
+        tz_name = CITY_TO_TZ.get(key)
+
+        if not tz_name:
+            # Может пользователь ввёл TZ-строку напрямую, например "Europe/Moscow"
+            try:
+                zi.ZoneInfo(city)
+                tz_name = city
+            except Exception:
+                pass
+
+        if not tz_name:
+            await message.answer(
+                f"❌ Город <b>{city}</b> не найден во встроенном справочнике.\n\n"
+                "Попробуй один из популярных городов:\n"
+                "Москва, Минск, Киев, Берлин, Лондон, Париж, Токио, Дубай, "
+                "Варшава, Алматы, Ташкент, Екатеринбург, Владивосток\n\n"
+                "Или укажи TZ напрямую, например: <code>/timezone Europe/Moscow</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        try:
+            zi.ZoneInfo(tz_name)
+        except Exception:
+            await message.answer(f"❌ Некорректный часовой пояс: <code>{tz_name}</code>", parse_mode="HTML")
+            return
+
+        await db.set_chat_timezone(message.chat.id, tz_name)
+        await message.answer(
+            f"✅ Часовой пояс группы установлен!\n\n"
+            f"🌍 Город: <b>{city}</b>\n"
+            f"🕐 Часовой пояс: <b>{tz_name}</b>",
+            parse_mode="HTML"
+        )
+
+
 # главный экран в личке
 async def _show_pm_home(message: Message):
 

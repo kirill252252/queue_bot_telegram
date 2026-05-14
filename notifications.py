@@ -6,7 +6,6 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 import db
-import schedule_db as sdb
 from config import NOTIFY_APPROACHING
 
 logger = logging.getLogger(__name__)
@@ -31,31 +30,8 @@ def _ready_keyboard(queue_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🚪 Выйти", callback_data=f"pm_leave:{queue_id}"),
     ]])
 
-
-async def _schedule_notify_enabled(chat_id: int) -> dict:
-    """
-    Возвращает настройки уведомлений расписания для чата.
-    Это нужно, чтобы переключатели в меню "📣 Уведомления" реально влияли
-    на уведомления очередей.
-    """
-    return await sdb.get_chat_schedule_settings(chat_id)
-
-
-async def _should_notify_queue_open(chat_id: int) -> bool:
-    settings = await _schedule_notify_enabled(chat_id)
-    return bool(settings.get("notify_on_open", 1))
-
-
-async def _should_notify_queue_close(chat_id: int) -> bool:
-    settings = await _schedule_notify_enabled(chat_id)
-    return bool(settings.get("notify_on_close", 1))
-
 # уведомляем нового первого в очереди
 async def notify_became_first(bot: Bot, queue: dict, member: dict, chat_id: int):
-    # notify_on_open — выключает уведомления о ходе очереди (ты первый/подошла)
-    if not await _should_notify_queue_open(chat_id):
-        return
-
     remind_min = queue.get("remind_timeout_min", 5)
     user_id = member["user_id"]
 
@@ -88,9 +64,6 @@ async def notify_approaching(bot: Bot, queue: dict, member: dict, position: int)
         return
     if position > NOTIFY_APPROACHING:
         return
-    # notify_on_open — выключает уведомления о скором освобождении/подходе
-    if not await _should_notify_queue_open(queue["chat_id"]):
-        return
     left = position - 1
     text = (
         f"⚡ <b>Скоро твоя очередь!</b>\n\n"
@@ -121,9 +94,7 @@ async def notify_kicked(bot: Bot, queue: dict, user_id: int, by_timeout: bool = 
 async def notify_leave_public(bot: Bot, queue: dict, member: dict, chat_id: int):
     if not queue:
         return
-    # notify_on_close — выключает "вышел из очереди" уведомления
-    if not await _should_notify_queue_close(chat_id):
-        return
+    # Проверяем только настройку самой очереди — notify_leave_public
     if not _as_bool(queue.get("notify_leave_public", True)):
         return
     name = member["display_name"]
@@ -140,9 +111,6 @@ async def notify_leave_public(bot: Bot, queue: dict, member: dict, chat_id: int)
 
 # говорим подписчикам что место освободилось
 async def notify_slot_available(bot: Bot, queue: dict):
-    # notify_on_open — выключает уведомления "место освободилось"
-    if not await _should_notify_queue_open(queue["chat_id"]):
-        return
     subscribers = await db.get_queue_subscribers(queue["id"])
     for user_id in subscribers:
         count = await db.get_member_count(queue["id"])
@@ -175,13 +143,6 @@ async def process_due_reminders(bot: Bot):
         if not queue or not queue["is_active"]:
             continue
 
-        # Если пользователь выключил notify_on_open — блокируем напоминания очередей,
-        # кроме тех, что являются внутренними для логики (кик/закрытие).
-        if not await _should_notify_queue_open(queue["chat_id"]):
-            # но очередь/места/кики всё равно должны обрабатываться дальше,
-            # поэтому просто пропускаем ветку рассылки ниже через проверку в местах отправки.
-            pass
-
         members = await db.get_queue_members(r["queue_id"])
         if not members or members[0]["user_id"] != r["user_id"]:
             continue
@@ -199,10 +160,6 @@ async def process_due_reminders(bot: Bot):
             if queue["max_slots"] > 0:
                 await notify_slot_available(bot, queue)
         else:
-            # Напоминания в личку/группу — это уведомления о ходе очереди (notify_on_open)
-            if not await _should_notify_queue_open(queue["chat_id"]):
-                continue
-
             dm_ok = await safe_dm(
                 bot, r["user_id"],
                 f"⏰ <b>Напоминание!</b>\n\n"
