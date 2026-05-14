@@ -128,6 +128,9 @@ async def init_db():
                 PRIMARY KEY (user_id, chat_id)
             )
         """)
+        await conn.execute("""
+            ALTER TABLE known_chats ADD COLUMN IF NOT EXISTS timezone TEXT
+        """)
 
 
 # ─── All functions mirror database.py exactly ────────────────────────────────
@@ -191,6 +194,22 @@ async def register_chat(chat_id: int, title: str):
             INSERT INTO known_chats (chat_id, title) VALUES ($1, $2)
             ON CONFLICT(chat_id) DO UPDATE SET title = EXCLUDED.title
         """, chat_id, title)
+
+
+async def set_chat_timezone(chat_id: int, tz_name: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE known_chats SET timezone = $1 WHERE chat_id = $2",
+            tz_name, chat_id)
+
+
+async def get_chat_timezone(chat_id: int) -> Optional[str]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT timezone FROM known_chats WHERE chat_id = $1", chat_id)
+        return row["timezone"] if row and row["timezone"] else None
 
 
 async def get_known_chats() -> list[dict]:
