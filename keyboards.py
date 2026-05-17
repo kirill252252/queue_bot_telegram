@@ -105,19 +105,16 @@ def pm_queue_actions_keyboard(queue_id: int, user_in: bool,
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# кнопки очередей в группе
-def queue_list_keyboard(queues: list[dict], is_admin: bool) -> InlineKeyboardMarkup:
+# кнопки очередей в группе — без админских действий, управление через /admin в личке
+def queue_list_keyboard(queues: list[dict], is_admin: bool = False) -> InlineKeyboardMarkup:
     buttons = [[InlineKeyboardButton(text=f"📋 {q['name']}",
                                       callback_data=f"view_queue:{q['id']}")]
                for q in queues]
-    if is_admin:
-        buttons.append([InlineKeyboardButton(text="➕ Создать очередь",
-                                              callback_data="create_queue")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# действия с конкретной очередью в группе
+# действия с конкретной очередью в группе — только пользовательские кнопки
 def queue_actions_keyboard(queue_id: int, user_in: bool,
-                           is_admin: bool, is_closed: bool,
+                           is_admin: bool = False, is_closed: bool = False,
                            user_is_first: bool = False) -> InlineKeyboardMarkup:
     buttons = []
     if not is_closed:
@@ -136,23 +133,6 @@ def queue_actions_keyboard(queue_id: int, user_in: bool,
                 text="✋ Занять место",
                 callback_data=f"join:{queue_id}"
             )])
-    if is_admin:
-        if not is_closed:
-            buttons.append([
-                InlineKeyboardButton(text="🔒 Закрыть",  callback_data=f"close_queue:{queue_id}"),
-                InlineKeyboardButton(text="🗑 Удалить",  callback_data=f"delete_queue:{queue_id}"),
-            ])
-            buttons.append([InlineKeyboardButton(text="👢 Кикнуть участника",
-                                                  callback_data=f"kick_menu:{queue_id}")])
-            buttons.append([InlineKeyboardButton(text="🔗 Ссылка-приглашение",
-                                                  callback_data=f"gen_invite:{queue_id}")])
-        buttons.append([
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"queue_settings:{queue_id}"),
-            InlineKeyboardButton(text="📥 CSV",        callback_data=f"export:{queue_id}"),
-        ])
-        buttons.append([
-            InlineKeyboardButton(text="📋 Создать по шаблону", callback_data=f"clone_queue:{queue_id}"),
-        ])
     buttons.append([
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"view_queue:{queue_id}"),
         InlineKeyboardButton(text="◀️ Назад",    callback_data="back_to_list"),
@@ -255,3 +235,89 @@ def swap_confirm_keyboard(request_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✅ Принять обмен", callback_data=f"swap_accept:{request_id}"),
         InlineKeyboardButton(text="❌ Отклонить",     callback_data=f"swap_decline:{request_id}"),
     ]])
+
+
+# ── Админ-панель в личке ──────────────────────────────────────────────────────
+
+def admin_panel_keyboard(chat_id: int, chat_name: str) -> InlineKeyboardMarkup:
+    """Главное меню админ-панели для конкретной группы."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Очереди",         callback_data=f"adm_queues:{chat_id}")],
+        [InlineKeyboardButton(text="➕ Создать очередь",  callback_data=f"adm_create:{chat_id}")],
+        [InlineKeyboardButton(text="👥 Бот-администраторы", callback_data=f"adm_admins:{chat_id}")],
+        [InlineKeyboardButton(text="🌍 Часовой пояс",    callback_data=f"adm_tz:{chat_id}")],
+        [InlineKeyboardButton(text="📊 Статистика",      callback_data=f"adm_stats:{chat_id}")],
+    ])
+
+
+def admin_queue_list_keyboard(queues: list[dict], chat_id: int) -> InlineKeyboardMarkup:
+    """Список очередей в админ-панели."""
+    buttons = [[InlineKeyboardButton(
+        text=f"{'🟢' if q['is_active'] else '🔴'} {q['name']}",
+        callback_data=f"adm_queue:{q['id']}"
+    )] for q in queues]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_queue_actions_keyboard(queue_id: int, chat_id: int,
+                                  is_closed: bool) -> InlineKeyboardMarkup:
+    """Действия с конкретной очередью в админ-панели."""
+    buttons = []
+    if not is_closed:
+        buttons.append([
+            InlineKeyboardButton(text="🔒 Закрыть",  callback_data=f"adm_close:{queue_id}"),
+            InlineKeyboardButton(text="🗑 Удалить",  callback_data=f"adm_delete:{queue_id}"),
+        ])
+        buttons.append([InlineKeyboardButton(text="👢 Кикнуть участника",
+                                              callback_data=f"adm_kick_menu:{queue_id}")])
+        buttons.append([InlineKeyboardButton(text="🔗 Ссылка-приглашение",
+                                              callback_data=f"adm_invite:{queue_id}")])
+    buttons.append([
+        InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"adm_settings:{queue_id}"),
+        InlineKeyboardButton(text="📥 CSV",        callback_data=f"adm_export:{queue_id}"),
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="📋 Создать по шаблону", callback_data=f"adm_clone:{queue_id}"),
+    ])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_queues:{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_queue_settings_keyboard(queue_id: int, chat_id: int, notify_leave: bool,
+                                   remind_min: int, auto_kick: bool) -> InlineKeyboardMarkup:
+    leave_icon = "🔔" if notify_leave else "🔕"
+    kick_icon  = "⚡" if auto_kick    else "🔕"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{leave_icon} Анонс выхода: {'вкл' if notify_leave else 'выкл'}",
+            callback_data=f"adm_toggle_leave:{queue_id}"
+        )],
+        [InlineKeyboardButton(
+            text=f"{kick_icon} Авто-кик: {'вкл' if auto_kick else 'выкл'}",
+            callback_data=f"adm_toggle_kick:{queue_id}"
+        )],
+        [InlineKeyboardButton(
+            text=f"⏱ Таймаут: {remind_min} мин",
+            callback_data=f"adm_set_remind:{queue_id}"
+        )],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_queue:{queue_id}")],
+    ])
+
+
+def admin_kick_keyboard(queue_id: int, members: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(
+        text=f"#{m['position']} {m['display_name']}",
+        callback_data=f"adm_kick:{queue_id}:{m['user_id']}"
+    )] for m in members]
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_queue:{queue_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def admin_chat_select_keyboard(chats: list[dict]) -> InlineKeyboardMarkup:
+    """Выбор группы для управления — если у админа несколько групп."""
+    buttons = [[InlineKeyboardButton(
+        text=f"💬 {c.get('title') or c['chat_id']}",
+        callback_data=f"adm_home:{c['chat_id']}"
+    )] for c in chats]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
