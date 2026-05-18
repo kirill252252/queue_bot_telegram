@@ -90,10 +90,20 @@ async def main():
     dp.include_router(router)
     dp.include_router(sched_router)
 
-    # Временно: логируем необработанные апдейты чтобы понять их тип
-    @dp.update()
-    async def log_unhandled(update: Update):
-        logger.warning(f"UNHANDLED update type={update.event_type} id={update.update_id}")
+    # Временно: логируем необработанные апдейты
+    from aiogram import BaseMiddleware
+    from aiogram.types import TelegramObject
+
+    class UnhandledLogger(BaseMiddleware):
+        async def __call__(self, handler, event: TelegramObject, data: dict):
+            result = await handler(event, data)
+            if result is None:
+                update: Update = data.get("update")
+                if update:
+                    logger.warning(f"UNHANDLED type={update.event_type} id={update.update_id}")
+            return result
+
+    dp.update.outer_middleware(UnhandledLogger())
 
     tasks = [
         asyncio.create_task(background_loop(bot), name="background_loop"),
