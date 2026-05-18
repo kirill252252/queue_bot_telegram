@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import suppress
 import logging
+logger = logging.getLogger(__name__)
 import sys
 
 from aiogram import Bot, Dispatcher
