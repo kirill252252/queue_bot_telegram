@@ -140,14 +140,7 @@ async def main():
             await asyncio.Event().wait()
         else:
             await bot.delete_webhook(drop_pending_updates=True)
-            await dp.start_polling(
-                bot,
-                allowed_updates=[
-                    "message",
-                    "callback_query",
-                    "my_chat_member",
-                ],
-            )
+            await dp.start_polling(bot)
     finally:
         for task in tasks:
             task.cancel()
