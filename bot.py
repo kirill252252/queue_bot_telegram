@@ -28,11 +28,10 @@ from source_monitor import close_session as close_source_monitor_session
 from source_monitor import source_monitor_loop
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-
-logger = logging.getLogger(__name__)
+logging.getLogger("aiogram.event").setLevel(logging.DEBUG)
 
 
 async def background_loop(bot: Bot):
