@@ -130,7 +130,6 @@ async def main():
                     "message",
                     "callback_query",
                     "my_chat_member",
-                    "chat_member",
                 ],
             )
     finally:

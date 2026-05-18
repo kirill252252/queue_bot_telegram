@@ -1690,3 +1690,17 @@ async def cb_clone_queue(call: CallbackQuery):
 @router.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
     await call.answer()
+
+
+# ── Chat membership events ────────────────────────────────────────────────────
+
+@router.my_chat_member()
+async def on_my_chat_member(update: ChatMemberUpdated):
+    """Бота добавили в группу — регистрируем чат. Кикнули — логируем."""
+    new_status = update.new_chat_member.status
+    chat = update.chat
+    if new_status in ("member", "administrator"):
+        await db.register_chat(chat.id, chat.title or str(chat.id))
+        logger.info(f"Bot added to chat {chat.id} ({chat.title})")
+    elif new_status in ("kicked", "left"):
+        logger.info(f"Bot removed from chat {chat.id} ({chat.title})")
