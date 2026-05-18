@@ -1,11 +1,11 @@
 import asyncio
 from contextlib import suppress
 import logging
-logger = logging.getLogger(__name__)
 import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Update
 
 from config import (
     BOT_TOKEN,
@@ -29,10 +29,11 @@ from source_monitor import close_session as close_source_monitor_session
 from source_monitor import source_monitor_loop
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logging.getLogger("aiogram.event").setLevel(logging.DEBUG)
+
+logger = logging.getLogger(__name__)
 
 
 async def background_loop(bot: Bot):
@@ -88,6 +89,11 @@ async def main():
 
     dp.include_router(router)
     dp.include_router(sched_router)
+
+    # Временно: логируем необработанные апдейты чтобы понять их тип
+    @dp.update()
+    async def log_unhandled(update: Update):
+        logger.warning(f"UNHANDLED update type={update.event_type} id={update.update_id}")
 
     tasks = [
         asyncio.create_task(background_loop(bot), name="background_loop"),
