@@ -1691,3 +1691,7 @@ async def cb_clone_queue(call: CallbackQuery):
 @router.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
     await call.answer()
+
+@router.update()
+async def catch_unhandled(update: Update):
+    logger.warning(f"Unhandled update: {update.model_dump_json(exclude_none=True)}")
