@@ -10,6 +10,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import ChatMemberUpdated
 from aiogram.types import ErrorEvent
+from aiogram.types import Update
+
 
 import db
 from keyboards import (
@@ -25,14 +27,6 @@ from notifications import (
     notify_approaching, notify_slot_available,
 )
 
-from aiogram.types import Update
-
-@router.update()
-async def catch_unhandled(update: Update):
-    logger.debug(f"Unhandled: {update.model_dump_json(exclude_none=True)}")
-
-logger = logging.getLogger(__name__)
-router = Router()
 
 # словарь chat_id -> название чата, живёт в памяти
 _chat_names: dict[int, str] = {}
@@ -1411,6 +1405,13 @@ async def cmd_addadmin(message: Message):
         )
     else:
         await message.answer(f"ℹ️ {name} уже является бот-администратором в этой группе.")
+
+@router.update()
+async def catch_unhandled(update: Update):
+    logger.debug(f"Unhandled: {update.model_dump_json(exclude_none=True)}")
+
+logger = logging.getLogger(__name__)
+router = Router()
 
 
 @router.message(Command("removeadmin"))
