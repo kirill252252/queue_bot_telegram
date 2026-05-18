@@ -20,9 +20,14 @@ def format_queue_info(queue: dict, members: list[dict]) -> str:
         lines.append("😶 Очередь пуста")
     return "\n".join(lines)
 
-def format_queue_list(queues: list[dict]) -> str:
+def format_queue_list(queues: list[dict], is_admin: bool = False) -> str:
     if not queues:
-        return "В этом чате пока нет активных очередей.\nСоздайте первую! 👇"
+        if is_admin:
+            return (
+                "В этом чате пока нет активных очередей.\n\n"
+                "Используй /admin в личке чтобы создать первую очередь. 👈"
+            )
+        return "В этом чате пока нет активных очередей."
     lines = ["<b>Активные очереди в этом чате:</b>", ""]
     for q in queues:
         slot = f" (макс. {q['max_slots']})" if q["max_slots"] > 0 else ""
