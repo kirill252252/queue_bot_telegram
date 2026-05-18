@@ -10,8 +10,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import ChatMemberUpdated
 from aiogram.types import ErrorEvent
-from aiogram.types import Update
-
 
 import db
 from keyboards import (
@@ -26,6 +24,9 @@ from notifications import (
     notify_became_first, notify_kicked, notify_leave_public,
     notify_approaching, notify_slot_available,
 )
+
+logger = logging.getLogger(__name__)
+router = Router()
 
 
 # словарь chat_id -> название чата, живёт в памяти
@@ -687,7 +688,7 @@ async def cmd_queue(message: Message):
 
     queues = await db.get_chat_queues(message.chat.id)
     admin = await is_admin(message.bot, message.chat.id, message.from_user.id)
-    await message.answer(format_queue_list(queues, admin),
+    await message.answer(format_queue_list(queues),
                          reply_markup=queue_list_keyboard(queues, admin),
                          parse_mode="HTML")
     await db.register_user_chat(message.from_user.id, message.chat.id)
@@ -696,7 +697,7 @@ async def cmd_queue(message: Message):
 async def cb_back_to_list(call: CallbackQuery):
     queues = await db.get_chat_queues(call.message.chat.id)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    await safe_edit_text(call.message, format_queue_list(queues, admin),
+    await safe_edit_text(call.message, format_queue_list(queues),
                          reply_markup=queue_list_keyboard(queues, admin),
                          parse_mode="HTML")
     await call.answer()
@@ -876,7 +877,7 @@ async def cb_cancel(call: CallbackQuery, state: FSMContext):
         return
     queues = await db.get_chat_queues(call.message.chat.id)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    await safe_edit_text(call.message, format_queue_list(queues, admin),
+    await safe_edit_text(call.message, format_queue_list(queues),
                                  reply_markup=queue_list_keyboard(queues, admin),
                                  parse_mode="HTML")
     await call.answer("Отменено")
@@ -1013,7 +1014,7 @@ async def cb_confirm_delete(call: CallbackQuery):
     await call.answer("🗑 Удалена.", show_alert=True)
     queues = await db.get_chat_queues(call.message.chat.id)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    await safe_edit_text(call.message, format_queue_list(queues, admin),
+    await safe_edit_text(call.message, format_queue_list(queues),
                                  reply_markup=queue_list_keyboard(queues, admin),
                                  parse_mode="HTML")
 
@@ -1406,13 +1407,6 @@ async def cmd_addadmin(message: Message):
     else:
         await message.answer(f"ℹ️ {name} уже является бот-администратором в этой группе.")
 
-@router.update()
-async def catch_unhandled(update: Update):
-    logger.debug(f"Unhandled: {update.model_dump_json(exclude_none=True)}")
-
-logger = logging.getLogger(__name__)
-router = Router()
-
 
 @router.message(Command("removeadmin"))
 async def cmd_removeadmin(message: Message):
@@ -1697,17 +1691,3 @@ async def cb_clone_queue(call: CallbackQuery):
 @router.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
     await call.answer()
-
-
-# ── Chat membership events ────────────────────────────────────────────────────
-
-@router.my_chat_member()
-async def on_my_chat_member(update: ChatMemberUpdated):
-    """Бота добавили в группу — регистрируем чат. Кикнули — логируем."""
-    new_status = update.new_chat_member.status
-    chat = update.chat
-    if new_status in ("member", "administrator"):
-        await db.register_chat(chat.id, chat.title or str(chat.id))
-        logger.info(f"Bot added to chat {chat.id} ({chat.title})")
-    elif new_status in ("kicked", "left"):
-        logger.info(f"Bot removed from chat {chat.id} ({chat.title})")
