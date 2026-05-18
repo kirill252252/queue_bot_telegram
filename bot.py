@@ -90,21 +90,6 @@ async def main():
     dp.include_router(router)
     dp.include_router(sched_router)
 
-    # Временно: логируем необработанные апдейты
-    from aiogram import BaseMiddleware
-    from aiogram.types import TelegramObject
-
-    class UnhandledLogger(BaseMiddleware):
-        async def __call__(self, handler, event: TelegramObject, data: dict):
-            result = await handler(event, data)
-            if result is None:
-                update: Update = data.get("update")
-                if update:
-                    logger.warning(f"UNHANDLED type={update.event_type} id={update.update_id}")
-            return result
-
-    dp.update.outer_middleware(UnhandledLogger())
-
     tasks = [
         asyncio.create_task(background_loop(bot), name="background_loop"),
         asyncio.create_task(
@@ -140,7 +125,14 @@ async def main():
             await asyncio.Event().wait()
         else:
             await bot.delete_webhook(drop_pending_updates=True)
-            await dp.start_polling(bot)
+            await dp.start_polling(
+                bot,
+                allowed_updates=[
+                    "message",
+                    "callback_query",
+                    "my_chat_member",
+                ],
+            )
     finally:
         for task in tasks:
             task.cancel()
