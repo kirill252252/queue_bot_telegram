@@ -25,6 +25,12 @@ from notifications import (
     notify_approaching, notify_slot_available,
 )
 
+from aiogram.types import Update
+
+@router.update()
+async def catch_unhandled(update: Update):
+    logger.debug(f"Unhandled: {update.model_dump_json(exclude_none=True)}")
+
 logger = logging.getLogger(__name__)
 router = Router()
 
