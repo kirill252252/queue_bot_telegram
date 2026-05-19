@@ -693,6 +693,66 @@ async def cmd_queue(message: Message):
                          parse_mode="HTML")
     await db.register_user_chat(message.from_user.id, message.chat.id)
 
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext):
+    if message.chat.type == "private":
+        await message.answer("Используй эту команду в группе.")
+        return
+
+    if message.chat.title:
+        _chat_names[message.chat.id] = message.chat.title
+        await db.register_chat(message.chat.id, message.chat.title)
+
+    if not await is_admin(message.bot, message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы могут создавать очереди.")
+        return
+
+    from notifications import safe_dm
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="➕ Создать очередь",
+            callback_data=f"create_queue_in:{message.chat.id}"
+        )
+    ]])
+
+    dm_ok = await safe_dm(
+        message.bot,
+        message.from_user.id,
+        f"👋 Панель администратора группы <b>{message.chat.title}</b>\n\n"
+        f"Нажми кнопку чтобы создать новую очередь:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+    bot_info = await message.bot.get_me()
+    if dm_ok:
+        await message.answer("📩 Открой личку с ботом — отправил туда меню администратора.")
+    else:
+        await message.answer(
+            f"❌ Не могу написать тебе в личку.\n"
+            f"Напиши боту /start в личке (@{bot_info.username}), а потом повтори."
+        )
+
+
+@router.callback_query(F.data.startswith("create_queue_in:"))
+async def cb_create_queue_in(call: CallbackQuery, state: FSMContext):
+    chat_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+    await state.update_data(chat_id=chat_id, msg_id=call.message.message_id)
+    await safe_edit_text(
+        call.message,
+        "📝 <b>Новая очередь</b>\n\nНазвание:",
+        reply_markup=cancel_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(CreateQueue.name)
+    await call.answer()
+
+
 @router.callback_query(F.data == "back_to_list")
 async def cb_back_to_list(call: CallbackQuery):
     queues = await db.get_chat_queues(call.message.chat.id)
