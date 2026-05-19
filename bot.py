@@ -63,7 +63,11 @@ async def start_web_panel():
         )
 
         server = uvicorn.Server(config)
-        asyncio.create_task(server.serve())
+        async def _serve():
+            with suppress(Exception):
+                await server.serve()
+
+        asyncio.create_task(_serve())
 
         logger.info(f"Web panel started on port {WEB_PANEL_PORT}")
 

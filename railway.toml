@@ -5,3 +5,4 @@ builder = "nixpacks"
 startCommand = "python bot.py"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
+numReplicas = 1
