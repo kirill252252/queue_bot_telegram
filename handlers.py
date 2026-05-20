@@ -18,6 +18,8 @@ from keyboards import (
     pm_chat_select_keyboard, pm_queue_select_keyboard, pm_queue_actions_keyboard,
     nick_group_select_keyboard, me_keyboard, pm_main_keyboard, pm_reply_keyboard,
     freeze_keyboard, swap_select_keyboard, swap_confirm_keyboard,
+    admin_panel_keyboard, admin_queue_list_keyboard, admin_queue_actions_keyboard,
+    admin_queue_settings_keyboard, admin_kick_keyboard, admin_chat_select_keyboard,
 )
 from helpers import format_queue_info, format_queue_list, format_pm_my_queues
 from notifications import (
@@ -87,6 +89,9 @@ class SetRemind(StatesGroup):
 class BroadcastState(StatesGroup):
     target = State()
     text = State()
+
+class AdmSetRemind(StatesGroup):
+    minutes = State()
 
 # проверяем является ли юзер админом — Telegram-права, бот-права или владелец
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -695,40 +700,57 @@ async def cmd_queue(message: Message):
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
+    # ── В личке: показываем панель управления ──────────────────────────────────
     if message.chat.type == "private":
-        await message.answer("Используй эту команду в группе.")
+        known_chats = await db.get_known_chats()
+        admin_chats = []
+        for c in known_chats:
+            _chat_names.setdefault(c["chat_id"], c["title"])
+            if await is_admin(message.bot, c["chat_id"], message.from_user.id):
+                admin_chats.append(c)
+        if not admin_chats:
+            await message.answer(
+                "❌ У тебя нет прав администратора ни в одной группе с этим ботом.\n\n"
+                "Добавь бота в группу и используй /admin там, или попроси владельца выдать тебе права."
+            )
+            return
+        if len(admin_chats) == 1:
+            c = admin_chats[0]
+            await message.answer(
+                f"⚙️ <b>Панель администратора</b>\n💬 {c.get('title', c['chat_id'])}",
+                reply_markup=admin_panel_keyboard(c["chat_id"], c.get("title", "")),
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(
+                "⚙️ <b>Панель администратора</b>\n\nВыбери группу:",
+                reply_markup=admin_chat_select_keyboard(admin_chats),
+                parse_mode="HTML"
+            )
         return
 
+    # ── В группе: шлём панель в личку ─────────────────────────────────────────
     if message.chat.title:
         _chat_names[message.chat.id] = message.chat.title
         await db.register_chat(message.chat.id, message.chat.title)
 
     if not await is_admin(message.bot, message.chat.id, message.from_user.id):
-        await message.answer("❌ Только администраторы могут создавать очереди.")
+        await message.answer("❌ Только администраторы могут управлять очередями.")
         return
 
     from notifications import safe_dm
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="➕ Создать очередь",
-            callback_data=f"create_queue_in:{message.chat.id}"
-        )
-    ]])
 
     dm_ok = await safe_dm(
         message.bot,
         message.from_user.id,
-        f"👋 Панель администратора группы <b>{message.chat.title}</b>\n\n"
-        f"Нажми кнопку чтобы создать новую очередь:",
-        reply_markup=kb,
+        f"⚙️ <b>Панель администратора</b>\n💬 {message.chat.title}",
+        reply_markup=admin_panel_keyboard(message.chat.id, message.chat.title or ""),
         parse_mode="HTML"
     )
 
     bot_info = await message.bot.get_me()
     if dm_ok:
-        await message.answer("📩 Открой личку с ботом — отправил туда меню администратора.")
+        await message.answer("📩 Открой личку с ботом — отправил туда панель администратора.")
     else:
         await message.answer(
             f"❌ Не могу написать тебе в личку.\n"
@@ -922,10 +944,15 @@ async def fsm_remind(message: Message, state: FSMContext):
     )
     await state.clear()
     queue = await db.get_queue(queue_id)
-    await safe_bot_edit_text(message.bot, 
-        format_queue_info(queue, []),
-        chat_id=d["chat_id"], message_id=d["msg_id"],
-        reply_markup=queue_actions_keyboard(queue_id, False, True, False),
+    # В личке — используем admin_queue_actions_keyboard, в группе — queue_actions_keyboard
+    if message.chat.type == "private":
+        kb = admin_queue_actions_keyboard(queue_id, d["chat_id"], is_closed=False)
+    else:
+        kb = queue_actions_keyboard(queue_id, False, True, False)
+    await safe_bot_edit_text(message.bot,
+        "✅ <b>Очередь создана!</b>\n\n" + format_queue_info(queue, []),
+        chat_id=message.chat.id, message_id=d["msg_id"],
+        reply_markup=kb,
         parse_mode="HTML")
 
 @router.callback_query(F.data == "cancel_fsm")
@@ -1526,6 +1553,419 @@ async def cmd_admins(message: Message):
 
     await message.answer("\n".join(lines), parse_mode="HTML")
 
+
+
+# ── Админ-панель в личке: adm_* обработчики ──────────────────────────────────
+
+@router.callback_query(F.data.startswith("adm_home:"))
+async def cb_adm_home(call: CallbackQuery):
+    chat_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Нет прав.", show_alert=True)
+        return
+    chat_name = _chat_names.get(chat_id, f"Чат {chat_id}")
+    await safe_edit_text(
+        call.message,
+        f"⚙️ <b>Панель администратора</b>\n💬 {chat_name}",
+        reply_markup=admin_panel_keyboard(chat_id, chat_name),
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_queues:"))
+async def cb_adm_queues(call: CallbackQuery):
+    chat_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Нет прав.", show_alert=True)
+        return
+    queues = await db.get_chat_queues(chat_id)
+    chat_name = _chat_names.get(chat_id, f"Чат {chat_id}")
+    if not queues:
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать очередь", callback_data=f"adm_create:{chat_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")],
+        ])
+        await safe_edit_text(call.message,
+            f"💬 <b>{chat_name}</b>\n\nОчередей пока нет.", reply_markup=kb, parse_mode="HTML")
+    else:
+        await safe_edit_text(call.message,
+            f"💬 <b>{chat_name}</b>\n\nВыбери очередь:",
+            reply_markup=admin_queue_list_keyboard(queues, chat_id), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_create:"))
+async def cb_adm_create(call: CallbackQuery, state: FSMContext):
+    chat_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Нет прав.", show_alert=True)
+        return
+    await state.update_data(chat_id=chat_id, msg_id=call.message.message_id)
+    await safe_edit_text(
+        call.message,
+        "📝 <b>Новая очередь</b>\n\nНазвание:",
+        reply_markup=cancel_keyboard(), parse_mode="HTML"
+    )
+    await state.set_state(CreateQueue.name)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_queue:"))
+async def cb_adm_queue(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    queue = await db.get_queue(queue_id)
+    if not queue:
+        await call.answer("Очередь не найдена.", show_alert=True)
+        return
+    if not await is_admin(call.bot, queue["chat_id"], call.from_user.id):
+        await call.answer("❌ Нет прав.", show_alert=True)
+        return
+    members = await db.get_queue_members(queue_id)
+    text = (
+        f"📋 <b>{queue['name']}</b>  "
+        f"{'🟢 Открыта' if queue['is_active'] else '🔴 Закрыта'}\n\n"
+        f"👥 Участников: {len(members)}"
+    )
+    await safe_edit_text(call.message, text,
+        reply_markup=admin_queue_actions_keyboard(queue_id, queue["chat_id"], not queue["is_active"]),
+        parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_settings:"))
+async def cb_adm_settings(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    queue = await db.get_queue(queue_id)
+    if not queue or not await is_admin(call.bot, queue["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    await safe_edit_text(call.message,
+        f"⚙️ <b>Настройки «{queue['name']}»</b>",
+        reply_markup=admin_queue_settings_keyboard(
+            queue_id, queue["chat_id"],
+            _as_bool(queue["notify_leave_public"]),
+            queue["remind_timeout_min"],
+            _as_bool(queue["auto_kick"])
+        ), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_toggle_leave:"))
+async def cb_adm_toggle_leave(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    new = not _as_bool(q["notify_leave_public"])
+    await db.update_queue_settings(queue_id, q["remind_timeout_min"], new, _as_bool(q["auto_kick"]))
+    q = await db.get_queue(queue_id)
+    await safe_edit_reply_markup(call.message,
+        reply_markup=admin_queue_settings_keyboard(
+            queue_id, q["chat_id"], _as_bool(q["notify_leave_public"]),
+            q["remind_timeout_min"], _as_bool(q["auto_kick"])))
+    await call.answer(f"Анонсы выхода {'✅ вкл' if new else '❌ выкл'}.")
+
+
+@router.callback_query(F.data.startswith("adm_toggle_kick:"))
+async def cb_adm_toggle_kick(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    new = not _as_bool(q["auto_kick"])
+    await db.update_queue_settings(queue_id, q["remind_timeout_min"], _as_bool(q["notify_leave_public"]), new)
+    q = await db.get_queue(queue_id)
+    await safe_edit_reply_markup(call.message,
+        reply_markup=admin_queue_settings_keyboard(
+            queue_id, q["chat_id"], _as_bool(q["notify_leave_public"]),
+            q["remind_timeout_min"], _as_bool(q["auto_kick"])))
+    await call.answer(f"Авто-кик {'✅ вкл' if new else '❌ выкл'}.")
+
+
+@router.callback_query(F.data.startswith("adm_set_remind:"))
+async def cb_adm_set_remind(call: CallbackQuery, state: FSMContext):
+    queue_id = int(call.data.split(":")[1])
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    await state.update_data(queue_id=queue_id, chat_id=q["chat_id"], msg_id=call.message.message_id)
+    await safe_edit_text(call.message, "⏱ Введи таймаут напоминания (1–60 минут):",
+        reply_markup=cancel_keyboard())
+    await state.set_state(AdmSetRemind.minutes)
+    await call.answer()
+
+@router.message(AdmSetRemind.minutes)
+async def fsm_adm_remind_set(message: Message, state: FSMContext):
+    try:
+        mins = int(message.text.strip())
+        if not (1 <= mins <= 60): raise ValueError
+    except ValueError:
+        await message.answer("Число от 1 до 60:")
+        return
+    d = await state.get_data()
+    queue_id = d["queue_id"]
+    q = await db.get_queue(queue_id)
+    await db.update_queue_settings(queue_id, mins, _as_bool(q["notify_leave_public"]), _as_bool(q["auto_kick"]))
+    await state.clear()
+    q = await db.get_queue(queue_id)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await safe_bot_edit_text(message.bot,
+        f"⚙️ <b>Настройки «{q['name']}»</b>",
+        chat_id=message.chat.id, message_id=d["msg_id"],
+        reply_markup=admin_queue_settings_keyboard(
+            queue_id, d["chat_id"], _as_bool(q["notify_leave_public"]),
+            q["remind_timeout_min"], _as_bool(q["auto_kick"])),
+        parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm_close:"))
+async def cb_adm_close(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Да, закрыть", callback_data=f"adm_confirm_close:{queue_id}"),
+        InlineKeyboardButton(text="❌ Отмена",       callback_data=f"adm_queue:{queue_id}"),
+    ]])
+    await safe_edit_text(call.message,
+        f"🔒 Закрыть очередь «{q['name']}»?", reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+@router.callback_query(F.data.startswith("adm_confirm_close:"))
+async def cb_adm_confirm_close(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    await db.close_queue(queue_id)
+    await call.answer("🔒 Очередь закрыта.", show_alert=True)
+    q = await db.get_queue(queue_id)
+    members = await db.get_queue_members(queue_id)
+    await safe_edit_text(call.message,
+        f"📋 <b>{q['name']}</b>  🔴 Закрыта\n\n👥 Участников: {len(members)}",
+        reply_markup=admin_queue_actions_keyboard(queue_id, q["chat_id"], is_closed=True),
+        parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm_delete:"))
+async def cb_adm_delete(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"adm_confirm_delete:{queue_id}"),
+        InlineKeyboardButton(text="❌ Отмена",       callback_data=f"adm_queue:{queue_id}"),
+    ]])
+    await safe_edit_text(call.message,
+        f"🗑 <b>Удалить очередь «{q['name']}»?</b>\nЭто необратимо.",
+        reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+@router.callback_query(F.data.startswith("adm_confirm_delete:"))
+async def cb_adm_confirm_delete(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    chat_id = q["chat_id"]
+    await db.delete_queue(queue_id)
+    await call.answer("🗑 Удалена.", show_alert=True)
+    queues = await db.get_chat_queues(chat_id)
+    chat_name = _chat_names.get(chat_id, f"Чат {chat_id}")
+    await safe_edit_text(call.message,
+        f"💬 <b>{chat_name}</b>\n\n{'Выбери очередь:' if queues else 'Очередей пока нет.'}",
+        reply_markup=admin_queue_list_keyboard(queues, chat_id) if queues else None,
+        parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm_kick_menu:"))
+async def cb_adm_kick_menu(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    members = await db.get_queue_members(queue_id)
+    if not members:
+        await call.answer("Очередь пуста.", show_alert=True)
+        return
+    await safe_edit_text(call.message,
+        f"👢 <b>Кикнуть участника из «{q['name']}»</b>\n\nВыбери:",
+        reply_markup=admin_kick_keyboard(queue_id, members), parse_mode="HTML")
+    await call.answer()
+
+@router.callback_query(F.data.startswith("adm_kick:"))
+async def cb_adm_kick(call: CallbackQuery):
+    _, qid_s, uid_s = call.data.split(":")
+    queue_id, user_id = int(qid_s), int(uid_s)
+    q = await db.get_queue(queue_id)
+    if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    members_before = await db.get_queue_members(queue_id)
+    left = next((m for m in members_before if m["user_id"] == user_id), None)
+    if not left:
+        await call.answer("Участник не найден.", show_alert=True)
+        return
+    was_first = left["position"] == 1
+    kicked_pos = left["position"]
+    await db.kick_member(queue_id, user_id)
+    await call.answer("👢 Кикнут.", show_alert=True)
+    await notify_kicked(call.bot, q, user_id, by_timeout=False, position=kicked_pos)
+    members = await db.get_queue_members(queue_id)
+    if was_first and members:
+        await notify_became_first(call.bot, q, members[0], q["chat_id"])
+    await safe_edit_text(call.message,
+        f"📋 <b>{q['name']}</b>  🟢 Открыта\n\n👥 Участников: {len(members)}",
+        reply_markup=admin_queue_actions_keyboard(queue_id, q["chat_id"], is_closed=False),
+        parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm_invite:"))
+async def cb_adm_invite(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    queue = await db.get_queue(queue_id)
+    if not queue or not await is_admin(call.bot, queue["chat_id"], call.from_user.id):
+        await call.answer("❌ Нет прав.", show_alert=True)
+        return
+    bot_info = await call.bot.get_me()
+    token = await db.create_invite(queue_id, call.from_user.id)
+    link = f"https://t.me/{bot_info.username}?start=invite_{token}"
+    await call.message.answer(
+        f"🔗 <b>Ссылка-приглашение в «{queue['name']}»:</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        f"Отправь её тем кто должен встать в очередь.",
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_export:"))
+async def cb_adm_export(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    queue = await db.get_queue(queue_id)
+    if not queue or not await is_admin(call.bot, queue["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    members = await db.get_queue_members(queue_id)
+    await call.answer("⏳ Генерирую...")
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["#", "Ник в очереди", "Telegram username", "User ID", "Вступил"])
+    for m in members:
+        w.writerow([m["position"], m["display_name"],
+                    f"@{m['username']}" if m.get("username") else "",
+                    m["user_id"], m.get("joined_at", "")])
+    csv_bytes = out.getvalue().encode("utf-8-sig")
+    fname = f"queue_{queue['name'].replace(' ', '_')}_{queue_id}.csv"
+    await call.message.answer_document(
+        BufferedInputFile(csv_bytes, filename=fname),
+        caption=f"📥 <b>{queue['name']}</b> — {len(members)} участников",
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("adm_clone:"))
+async def cb_adm_clone(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    original = await db.get_queue(queue_id)
+    if not original or not await is_admin(call.bot, original["chat_id"], call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    new_id = await db.create_queue(
+        chat_id=original["chat_id"], name=original["name"],
+        description=original.get("description"), max_slots=original["max_slots"],
+        created_by=call.from_user.id,
+        remind_timeout_min=original.get("remind_timeout_min", 5),
+        notify_leave_public=bool(original.get("notify_leave_public", True)),
+        auto_kick=bool(original.get("auto_kick", True)),
+    )
+    await call.answer(f"✅ Создана копия «{original['name']}»!", show_alert=True)
+    new_queue = await db.get_queue(new_id)
+    await call.message.answer(
+        f"✅ <b>Очередь создана по шаблону!</b>\n\n" + format_queue_info(new_queue, []),
+        reply_markup=admin_queue_actions_keyboard(new_id, original["chat_id"], is_closed=False),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("adm_stats:"))
+async def cb_adm_stats(call: CallbackQuery):
+    chat_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    queues = await db.get_chat_queues(chat_id)
+    lines = [f"📊 <b>Статистика</b> — {_chat_names.get(chat_id, 'чат')}\n"]
+    total_members = 0
+    for q in queues:
+        members = await db.get_queue_members(q["id"])
+        total_members += len(members)
+        status = "🟢" if q["is_active"] else "🔴"
+        lines.append(f"{status} <b>{q['name']}</b> — {len(members)} чел.")
+    lines.append(f"\n👥 Всего в очередях: <b>{total_members}</b>")
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")
+    ]])
+    await safe_edit_text(call.message, "\n".join(lines), reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_tz:"))
+async def cb_adm_tz(call: CallbackQuery):
+    chat_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")
+    ]])
+    await safe_edit_text(call.message,
+        "🌍 <b>Часовой пояс</b>\n\nНастройка часового пояса пока недоступна в этой версии.",
+        reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_admins:"))
+async def cb_adm_admins(call: CallbackQuery):
+    chat_id = int(call.data.split(":")[1])
+    if not await is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    admins = await db.get_bot_admins(chat_id)
+    chat_name = _chat_names.get(chat_id, f"Чат {chat_id}")
+    lines = [f"👥 <b>Бот-администраторы</b> — {chat_name}\n"]
+    if admins:
+        for a in admins:
+            name = a.get("full_name") or a.get("username") or str(a["user_id"])
+            uname = f" (@{a['username']})" if a.get("username") else ""
+            lines.append(f"• {name}{uname}")
+    else:
+        lines.append("Бот-администраторов нет.\n\nЧтобы добавить — используй /addadmin @username в группе.")
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")
+    ]])
+    await safe_edit_text(call.message, "\n".join(lines), reply_markup=kb, parse_mode="HTML")
+    await call.answer()
 
 
 # рассылка сообщений от имени бота — только для владельца
