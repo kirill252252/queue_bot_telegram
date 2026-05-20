@@ -24,12 +24,13 @@ logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
-    """
-    Текущее время с учётом TZ_OFFSET из .env.
-    Railway/VPS работают на UTC — без смещения очереди не откроются в нужное время.
-    Добавьте в .env: TZ_OFFSET=4 (для UTC+4)
-    """
+    """Глобальное локальное время (fallback на TZ_OFFSET из .env)."""
     return sdb.get_local_now()
+
+
+async def _now_for_chat(chat_id: int) -> datetime:
+    """Локальное время с учётом таймзоны конкретного чата."""
+    return await sdb.get_local_now_for_chat(chat_id)
 
 
 # ─────────────────────────────────────────────
@@ -117,17 +118,12 @@ async def process_schedule_tick(bot):
     """
     Запускается каждую минуту из background_loop.
     Алгоритм:
-      1. Берём локальное время с учётом TZ_OFFSET
+      1. Берём локальное время с учётом таймзоны чата (или TZ_OFFSET из .env)
       2. Для каждой группы: занятия дня → overrides → фильтр недели → открыть/закрыть очереди
-    
+
     ИСПРАВЛЕНИЕ: Настройки загружаются ОДИН РАЗ на группу (не на каждую пару),
     и сразу гарантируем наличие строки в БД.
     """
-    now          = _now()
-    today        = now.strftime("%Y-%m-%d")
-    current_time = now.strftime("%H:%M")
-    weekday      = now.isoweekday()
-
     groups = await sdb.get_all_study_groups()
     if not groups:
         return
@@ -135,6 +131,12 @@ async def process_schedule_tick(bot):
     for group in groups:
         group_id = group["id"]
         chat_id  = group["chat_id"]
+
+        # Время берём с учётом таймзоны конкретного чата
+        now          = await _now_for_chat(chat_id)
+        today        = now.strftime("%Y-%m-%d")
+        current_time = now.strftime("%H:%M")
+        weekday      = now.isoweekday()
 
         lessons = await sdb.get_lessons_for_day(group_id, weekday)
         if not lessons:

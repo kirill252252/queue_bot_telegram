@@ -39,8 +39,52 @@ def _get_local_offset() -> timedelta:
         return timedelta(0)
 
 
-def get_local_now() -> datetime:
-    return datetime.now(timezone.utc) + _get_local_offset()
+def _tz_offset_for_name(tz_name: str) -> timedelta:
+    """Возвращает timedelta для строки вида 'UTC+3', 'UTC-5', 'UTC+5:30'."""
+    import re
+    m = re.match(r"UTC([+-])(\d{1,2})(?::(\d{2}))?$", tz_name.strip(), re.IGNORECASE)
+    if not m:
+        return _get_local_offset()
+    sign = 1 if m.group(1) == "+" else -1
+    hours = int(m.group(2))
+    minutes = int(m.group(3)) if m.group(3) else 0
+    return timedelta(hours=sign * hours, minutes=sign * minutes)
+
+
+# Простой in-process кэш чтобы не ходить в БД каждую минуту на каждую группу
+_tz_cache: dict[int, str] = {}
+
+
+async def get_chat_tz_offset(chat_id: int) -> timedelta:
+    """Возвращает смещение для чата: сначала из БД, иначе из TZ_OFFSET в .env."""
+    import db as _db
+    tz_name = _tz_cache.get(chat_id)
+    if tz_name is None:
+        tz_name = await _db.get_chat_timezone(chat_id) or ""
+        _tz_cache[chat_id] = tz_name
+    if tz_name:
+        return _tz_offset_for_name(tz_name)
+    return _get_local_offset()
+
+
+def invalidate_tz_cache(chat_id: int):
+    """Сбрасываем кэш при изменении таймзоны чата."""
+    _tz_cache.pop(chat_id, None)
+
+
+def get_local_now(offset: timedelta | None = None) -> datetime:
+    """Текущее время с применением смещения (UTC + offset).
+    Используй get_local_now_for_chat() если нужно per-chat время.
+    """
+    if offset is None:
+        offset = _get_local_offset()
+    return datetime.now(timezone.utc) + offset
+
+
+async def get_local_now_for_chat(chat_id: int) -> datetime:
+    """Текущее время с учётом таймзоны конкретного чата."""
+    offset = await get_chat_tz_offset(chat_id)
+    return datetime.now(timezone.utc) + offset
 
 
 def get_week_type_for_date(

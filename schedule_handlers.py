@@ -354,7 +354,7 @@ async def cb_show_today(call: CallbackQuery):
         await call.answer("Расписание не загружено.", show_alert=True)
         return
 
-    wd       = sdb.get_local_now().isoweekday()
+    wd       = (await sdb.get_local_now_for_chat(chat_id)).isoweekday()
     day_name = DAYS_FULL.get(wd, str(wd))
     bells_cache = {b["lesson_num"]: b for b in await sdb.get_bells(chat_id)}
 
@@ -1072,7 +1072,7 @@ async def cb_override_group(call: CallbackQuery):
         await call.answer("❌ Только администраторы.", show_alert=True)
         return
 
-    today   = sdb.get_local_now()
+    today   = await sdb.get_local_now_for_chat(chat_id)
     buttons = []
     for delta in range(7):
         day = today + timedelta(days=delta)
@@ -1641,21 +1641,28 @@ class NotifyBeforeState(StatesGroup):
     waiting_minutes = State()  # ждём количество минут для предупреждения заранее
 
 
-def _notify_settings_text(settings: dict) -> str:
+async def _notify_settings_text(settings: dict, chat_id: int) -> str:
     """Форматируем текст с текущими настройками уведомлений расписания."""
-    from config import TZ_OFFSET
+    import db as _db
     on_open  = "✅ вкл" if settings.get("notify_on_open",  1) else "❌ выкл"
     on_close = "✅ вкл" if settings.get("notify_on_close", 1) else "❌ выкл"
     before   = settings.get("notify_before_min", 0)
     before_s = f"{before} мин" if before > 0 else "выкл"
-    tz_s     = f"UTC+{TZ_OFFSET}" if TZ_OFFSET >= 0 else f"UTC{TZ_OFFSET}"
+    tz_name  = await _db.get_chat_timezone(chat_id)
+    if tz_name:
+        tz_s = tz_name
+    else:
+        try:
+            from config import TZ_OFFSET
+            tz_s = f"UTC+{TZ_OFFSET}" if TZ_OFFSET >= 0 else f"UTC{TZ_OFFSET}"
+        except Exception:
+            tz_s = "UTC+0"
     return (
         f"📣 <b>Настройки уведомлений расписания</b>\n\n"
         f"🟢 При начале пары:       <b>{on_open}</b>\n"
         f"🔴 При конце пары:        <b>{on_close}</b>\n"
         f"⏰ Предупреждать заранее: <b>{before_s}</b>\n\n"
-        f"🕐 Часовой пояс: <b>{tz_s}</b>\n"
-        f"<i>Изменить пояс: добавьте TZ_OFFSET=N в .env</i>"
+        f"🕐 Часовой пояс: <b>{tz_s}</b>"
     )
 
 
@@ -1690,7 +1697,7 @@ async def cb_notify_settings(call: CallbackQuery):
         return
     settings = await sdb.get_chat_schedule_settings(chat_id)
     await call.message.edit_text(
-        _notify_settings_text(settings),
+        await _notify_settings_text(settings, chat_id),
         reply_markup=_notify_settings_keyboard(chat_id, settings),
         parse_mode="HTML",
     )
@@ -1711,7 +1718,7 @@ async def cb_notify_toggle(call: CallbackQuery):
     await call.answer(f"{'✅ Вкл' if new_val else '❌ Выкл'}: {label}")
     settings = await sdb.get_chat_schedule_settings(chat_id)
     await call.message.edit_text(
-        _notify_settings_text(settings),
+        await _notify_settings_text(settings, chat_id),
         reply_markup=_notify_settings_keyboard(chat_id, settings),
         parse_mode="HTML",
     )
@@ -1755,7 +1762,7 @@ async def cb_notify_before_set(call: CallbackQuery, state: FSMContext):
     await call.answer(f"✅ {'Выключено' if minutes == 0 else f'За {minutes} мин'}")
     settings = await sdb.get_chat_schedule_settings(chat_id)
     await call.message.edit_text(
-        _notify_settings_text(settings),
+        await _notify_settings_text(settings, chat_id),
         reply_markup=_notify_settings_keyboard(chat_id, settings),
         parse_mode="HTML",
     )
@@ -1778,7 +1785,7 @@ async def fsm_notify_before_minutes(message: Message, state: FSMContext):
     settings = await sdb.get_chat_schedule_settings(chat_id)
     await message.answer(
         f"✅ Сохранено: {'выключено' if minutes == 0 else f'за {minutes} мин'}.\n\n"
-        + _notify_settings_text(settings),
+        + await _notify_settings_text(settings, chat_id),
         reply_markup=_notify_settings_keyboard(chat_id, settings),
         parse_mode="HTML",
     )

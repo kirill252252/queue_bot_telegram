@@ -1928,20 +1928,78 @@ async def cb_adm_stats(call: CallbackQuery):
     await call.answer()
 
 
+# Популярные таймзоны для быстрого выбора
+_TZ_PRESETS = [
+    ("UTC+0",    "🌍 UTC+0  (Лондон)"),
+    ("UTC+1",    "🌍 UTC+1  (Берлин, Варшава)"),
+    ("UTC+2",    "🌍 UTC+2  (Киев, Хельсинки)"),
+    ("UTC+3",    "🌍 UTC+3  (Москва, Минск)"),
+    ("UTC+4",    "🌍 UTC+4  (Баку, Самара)"),
+    ("UTC+5",    "🌍 UTC+5  (Екатеринбург)"),
+    ("UTC+5:30", "🌍 UTC+5:30 (Индия)"),
+    ("UTC+6",    "🌍 UTC+6  (Омск)"),
+    ("UTC+7",    "🌍 UTC+7  (Красноярск)"),
+    ("UTC+8",    "🌍 UTC+8  (Иркутск, Пекин)"),
+    ("UTC+9",    "🌍 UTC+9  (Якутск, Токио)"),
+    ("UTC+10",   "🌍 UTC+10 (Владивосток)"),
+    ("UTC+11",   "🌍 UTC+11 (Магадан)"),
+    ("UTC+12",   "🌍 UTC+12 (Камчатка)"),
+]
+
+
+def _tz_keyboard(chat_id: int, current_tz: str | None) -> "InlineKeyboardMarkup":
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    for tz_val, tz_label in _TZ_PRESETS:
+        mark = " ✅" if tz_val == current_tz else ""
+        rows.append([InlineKeyboardButton(
+            text=tz_label + mark,
+            callback_data=f"adm_tz_set:{chat_id}:{tz_val}",
+        )])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.callback_query(F.data.startswith("adm_tz:"))
 async def cb_adm_tz(call: CallbackQuery):
     chat_id = int(call.data.split(":")[1])
     if not await is_admin(call.bot, chat_id, call.from_user.id):
         await call.answer("❌", show_alert=True)
         return
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")
-    ]])
-    await safe_edit_text(call.message,
-        "🌍 <b>Часовой пояс</b>\n\nНастройка часового пояса пока недоступна в этой версии.",
-        reply_markup=kb, parse_mode="HTML")
+    current_tz = await db.get_chat_timezone(chat_id)
+    tz_display = current_tz or "не задан (используется TZ_OFFSET из .env)"
+    await safe_edit_text(
+        call.message,
+        f"🌍 <b>Часовой пояс</b>\n\nТекущий: <b>{tz_display}</b>\n\nВыберите часовой пояс:",
+        reply_markup=_tz_keyboard(chat_id, current_tz),
+        parse_mode="HTML",
+    )
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_tz_set:"))
+async def cb_adm_tz_set(call: CallbackQuery):
+    parts   = call.data.split(":")
+    chat_id = int(parts[1])
+    # tz_val может содержать ":" (UTC+5:30) — берём всё после второго двоеточия
+    tz_val  = ":".join(parts[2:])
+    if not await is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌", show_alert=True)
+        return
+    await db.set_chat_timezone(chat_id, tz_val)
+    # Сбрасываем кэш в schedule_db
+    try:
+        import schedule_db as sdb
+        sdb.invalidate_tz_cache(chat_id)
+    except Exception:
+        pass
+    await call.answer(f"✅ Часовой пояс установлен: {tz_val}", show_alert=True)
+    await safe_edit_text(
+        call.message,
+        f"🌍 <b>Часовой пояс</b>\n\nТекущий: <b>{tz_val}</b>\n\nВыберите часовой пояс:",
+        reply_markup=_tz_keyboard(chat_id, tz_val),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("adm_admins:"))
