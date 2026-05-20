@@ -169,13 +169,13 @@ async def cmd_help(message: Message):
                              message.from_user.username)
     await message.answer(
         "👋 <b>Queue Bot</b>\n\n"
-        "<b>В группе:</b> /queue — список очередей\n\n"
+        "<b>В группе:</b> /queue - список очередей\n\n"
         "<b>В личке:</b>\n"
-        "  /start — выбрать группу и встать в очередь\n"
-        "  /me — твои ники по группам\n"
-        "  /myqueues — все твои текущие очереди\n\n"
-        "🔔 Когда ты первый — бот пришлёт кнопки «Я готов» / «Выхожу».\n"
-        "⚡ Не ответил за N мин — авто-кик (если включён администратором).\n"
+        "  /start - выбрать группу и встать в очередь\n"
+        "  /me - твои ники по группам\n"
+        "  /myqueues - все твои текущие очереди\n\n"
+        "🔔 Когда ты первый - бот пришлёт кнопки «Я готов» / «Выхожу».\n"
+        "⚡ Не ответил за N мин - авто-кик (если включён администратором).\n"
         "✏️ Ник устанавливается отдельно для каждой группы через /me.",
         parse_mode="HTML"
     )
@@ -376,7 +376,7 @@ async def cb_confirm_ready(call: CallbackQuery):
 
     await safe_edit_text(call.message, 
         f"✅ Отлично! Ты подтвердил готовность (место #{pos}) в очереди <b>«{name}»</b>.\n\n"
-        f"Когда закончишь — нажми «Выйти» в боте или в группе.",
+        f"Когда закончишь - нажми «Выйти» в боте или в группе.",
         parse_mode="HTML"
     )
     await call.answer("Готовность подтверждена!")
@@ -460,7 +460,7 @@ async def cb_pm_myqueues(call: CallbackQuery):
 
     lines = ["📋 <b>Твои активные очереди:</b>\n"]
     for e in entries:
-        lines.append(f"💬 {e['chat_name']}\n   └ <b>{e['queue_name']}</b> — место <b>#{e['position']}</b>")
+        lines.append(f"💬 {e['chat_name']}\n   └ <b>{e['queue_name']}</b> - место <b>#{e['position']}</b>")
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     buttons = []
@@ -493,7 +493,7 @@ async def reply_myqueues(message: Message):
     lines = ["📋 <b>Твои активные очереди:</b>\n"]
     buttons = []
     for e in entries:
-        lines.append(f"💬 {e['chat_name']}\n   └ <b>{e['queue_name']}</b> — место <b>#{e['position']}</b>")
+        lines.append(f"💬 {e['chat_name']}\n   └ <b>{e['queue_name']}</b> - место <b>#{e['position']}</b>")
         buttons.append([InlineKeyboardButton(
             text=f"📋 {e['queue_name']} (#{e['position']})",
             callback_data=f"pm_queue:{e['queue_id']}"
@@ -507,7 +507,7 @@ async def reply_find_queue(message: Message):
     if not queues:
         await message.answer(
             "😕 Не нашёл активных очередей.\n\n"
-            "Зайди в группу и напиши /queue — бот запомнит её."
+            "Зайди в группу и напиши /queue - бот запомнит её."
         )
         return
     kb = pm_chat_select_keyboard(queues, _chat_names)
@@ -520,15 +520,15 @@ async def reply_profile(message: Message):
 @router.message(F.chat.type == "private", F.text == "❓ Помощь")
 async def reply_help(message: Message):
     await message.answer(
-        "👋 <b>Queue Bot — помощь</b>\n\n"
+        "👋 <b>Queue Bot - помощь</b>\n\n"
         "<b>Кнопки внизу:</b>\n"
-        "📋 Мои очереди — твои текущие позиции\n"
-        "🔍 Найти очередь — записаться в очередь группы\n"
-        "👤 Профиль / Ник — установить отображаемое имя\n\n"
+        "📋 Мои очереди - твои текущие позиции\n"
+        "🔍 Найти очередь - записаться в очередь группы\n"
+        "👤 Профиль / Ник - установить отображаемое имя\n\n"
         "<b>В группе:</b>\n"
-        "/queue — список очередей\n"
-        "/list — просмотр очередей со всеми участниками\n\n"
-        "🔔 Когда ты станешь первым — я пришлю уведомление сюда.\n"
+        "/queue - список очередей\n"
+        "/list - просмотр очередей со всеми участниками\n\n"
+        "🔔 Когда ты станешь первым - я пришлю уведомление сюда.\n"
         "✅ Нажми «Я прошёл, следующий!» когда закончишь.",
         parse_mode="HTML"
     )
@@ -542,7 +542,7 @@ async def _show_me(message_or_call, user_id: int, edit: bool = False):
             gname = _chat_names.get(n["chat_id"], f"Чат {n['chat_id']}")
             lines.append(f"💬 {gname}: <b>{n['nick']}</b>")
     else:
-        lines.append("Кастомных ников нет — используется имя из Telegram.")
+        lines.append("Кастомных ников нет - используется имя из Telegram.")
     text = "\n".join(lines)
     kb = me_keyboard(has_nick)
     if edit:
@@ -672,7 +672,7 @@ async def cmd_myplace(message: Message):
     lines = ["\U0001f4cd <b>Твои места в очередях:</b>\n"]
     for m in chat_memberships:
         total = await db.get_member_count(m["queue_id"])
-        lines.append(f"\U0001f4cb <b>{m['queue_name']}</b> — место <b>#{m['position']}</b> из {total}")
+        lines.append(f"\U0001f4cb <b>{m['queue_name']}</b> - место <b>#{m['position']}</b> из {total}")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
@@ -750,7 +750,7 @@ async def cmd_admin(message: Message, state: FSMContext):
 
     bot_info = await message.bot.get_me()
     if dm_ok:
-        await message.answer("📩 Открой личку с ботом — отправил туда панель администратора.")
+        await message.answer("📩 Открой личку с ботом - отправил туда панель администратора.")
     else:
         await message.answer(
             f"❌ Не могу написать тебе в личку.\n"
@@ -1166,7 +1166,7 @@ async def cb_export(call: CallbackQuery):
     fname = f"queue_{queue['name'].replace(' ', '_')}_{queue_id}.csv"
     await call.message.answer_document(
         BufferedInputFile(csv_bytes, filename=fname),
-        caption=f"📥 <b>{queue['name']}</b> — {len(members)} участников",
+        caption=f"📥 <b>{queue['name']}</b> - {len(members)} участников",
         parse_mode="HTML"
     )
 
@@ -1357,7 +1357,7 @@ async def cb_swap_request(call: CallbackQuery):
     if sent:
         await call.answer(f"✅ Запрос отправлен {target_member['display_name']}. Ждём ответа.", show_alert=True)
     else:
-        await call.answer("😔 Не удалось отправить запрос — пользователь не писал боту в личку.", show_alert=True)
+        await call.answer("😔 Не удалось отправить запрос - пользователь не писал боту в личку.", show_alert=True)
 
     members = await db.get_queue_members(queue_id)
     text = format_queue_info(queue, members)
@@ -1377,7 +1377,7 @@ async def cb_swap_accept(call: CallbackQuery):
 
     success = await db.execute_swap(req["queue_id"], req["from_user"], req["to_user"])
     if not success:
-        await safe_edit_text(call.message, "❌ Не удалось выполнить обмен — кто-то уже вышел из очереди.")
+        await safe_edit_text(call.message, "❌ Не удалось выполнить обмен - кто-то уже вышел из очереди.")
         return
 
     queue = await db.get_queue(req["queue_id"])
@@ -1549,7 +1549,7 @@ async def cmd_admins(message: Message):
     for a in admins:
         name = a.get("full_name") or a.get("username") or str(a["user_id"])
         username = f" (@{a['username']})" if a.get("username") else ""
-        lines.append(f"• {name}{username} — <code>{a['user_id']}</code>")
+        lines.append(f"• {name}{username} - <code>{a['user_id']}</code>")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
 
@@ -1876,7 +1876,7 @@ async def cb_adm_export(call: CallbackQuery):
     fname = f"queue_{queue['name'].replace(' ', '_')}_{queue_id}.csv"
     await call.message.answer_document(
         BufferedInputFile(csv_bytes, filename=fname),
-        caption=f"📥 <b>{queue['name']}</b> — {len(members)} участников",
+        caption=f"📥 <b>{queue['name']}</b> - {len(members)} участников",
         parse_mode="HTML"
     )
 
@@ -1912,13 +1912,13 @@ async def cb_adm_stats(call: CallbackQuery):
         await call.answer("❌", show_alert=True)
         return
     queues = await db.get_chat_queues(chat_id)
-    lines = [f"📊 <b>Статистика</b> — {_chat_names.get(chat_id, 'чат')}\n"]
+    lines = [f"📊 <b>Статистика</b> - {_chat_names.get(chat_id, 'чат')}\n"]
     total_members = 0
     for q in queues:
         members = await db.get_queue_members(q["id"])
         total_members += len(members)
         status = "🟢" if q["is_active"] else "🔴"
-        lines.append(f"{status} <b>{q['name']}</b> — {len(members)} чел.")
+        lines.append(f"{status} <b>{q['name']}</b> - {len(members)} чел.")
     lines.append(f"\n👥 Всего в очередях: <b>{total_members}</b>")
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -1952,14 +1952,14 @@ async def cb_adm_admins(call: CallbackQuery):
         return
     admins = await db.get_bot_admins(chat_id)
     chat_name = _chat_names.get(chat_id, f"Чат {chat_id}")
-    lines = [f"👥 <b>Бот-администраторы</b> — {chat_name}\n"]
+    lines = [f"👥 <b>Бот-администраторы</b> - {chat_name}\n"]
     if admins:
         for a in admins:
             name = a.get("full_name") or a.get("username") or str(a["user_id"])
             uname = f" (@{a['username']})" if a.get("username") else ""
             lines.append(f"• {name}{uname}")
     else:
-        lines.append("Бот-администраторов нет.\n\nЧтобы добавить — используй /addadmin @username в группе.")
+        lines.append("Бот-администраторов нет.\n\nЧтобы добавить - используй /addadmin @username в группе.")
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")
@@ -1996,7 +1996,7 @@ async def cb_broadcast_all(call: CallbackQuery, state: FSMContext):
         return
     await state.update_data(broadcast_mode="all")
     await safe_edit_text(call.message, 
-        "📢 Напиши сообщение или отправь фото — оно уйдёт всем пользователям которые писали боту:",
+        "📢 Напиши сообщение или отправь фото - оно уйдёт всем пользователям которые писали боту:",
         reply_markup=cancel_keyboard()
     )
     await state.set_state(BroadcastState.text)
@@ -2037,7 +2037,7 @@ async def cb_broadcast_to_group(call: CallbackQuery, state: FSMContext):
     chat_id = int(call.data.split(":")[1])
     await state.update_data(broadcast_mode="group", broadcast_chat_id=chat_id)
     await safe_edit_text(call.message, 
-        "📢 Напиши сообщение или отправь фото — оно уйдёт в выбранную группу:",
+        "📢 Напиши сообщение или отправь фото - оно уйдёт в выбранную группу:",
         reply_markup=cancel_keyboard()
     )
     await state.set_state(BroadcastState.text)
