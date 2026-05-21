@@ -402,11 +402,11 @@ async def _build_sources_keyboard(chat_id: int, sources: list[dict]) -> InlineKe
 
 @sched_router.callback_query(F.data.startswith("schedule_sources:"))
 async def cb_sources(call: CallbackQuery):
-    """Sources menu for schedule change monitoring."""
+    """Меню управления источниками мониторинга расписания."""
     chat_id = int(call.data.split(":")[1])
 
     if not await _is_admin(call.bot, chat_id, call.from_user.id):
-        await call.answer("Admins only.", show_alert=True)
+        await call.answer("❌ Только администраторы.", show_alert=True)
         return
 
     sources = await sdb.get_chat_sources(chat_id)
@@ -414,20 +414,21 @@ async def cb_sources(call: CallbackQuery):
 
     if sources:
         lines = "\n".join(
-            f"- {'TG' if s['source_type'] == 'telegram' else 'VK'}: {s['source_id']}"
+            f"- {'Telegram' if s['source_type'] == 'telegram' else 'ВКонтакте'}: {s['source_id']}"
             for s in sources
         )
         text = (
-            "<b>Schedule Sources</b>\n\n"
-            "The bot watches these channels and applies changes automatically:\n\n"
-            f"{lines}"
+            "<b>📡 Источники расписания</b>\n\n"
+            "Бот отслеживает эти каналы и автоматически применяет изменения:\n\n"
+            f"{lines}\n\n"
+            f"<i>Проверка каждые {SOURCE_MONITOR_INTERVAL_MIN} мин.</i>"
         )
     else:
         text = (
-            "<b>Schedule Sources</b>\n\n"
-            "No sources added yet.\n\n"
-            "Add a Telegram channel or VK group and the bot will check it every "
-            f"{SOURCE_MONITOR_INTERVAL_MIN} minutes."
+            "<b>📡 Источники расписания</b>\n\n"
+            "Источники ещё не добавлены.\n\n"
+            "Добавь Telegram-канал или группу ВКонтакте — бот будет проверять их "
+            f"каждые {SOURCE_MONITOR_INTERVAL_MIN} мин. и применять изменения автоматически."
         )
 
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -464,7 +465,7 @@ async def fsm_receive_source(message: Message, state: FSMContext):
     await state.clear()
 
     if not source_id:
-        await message.answer("Empty value. Try again via /schedule.")
+        await message.answer("Пустое значение. Попробуй снова через /schedule.")
         return
 
     if source_type == "telegram":
@@ -472,10 +473,11 @@ async def fsm_receive_source(message: Message, state: FSMContext):
 
     await sdb.add_source(chat_id, source_type, source_id)
     await message.answer(
-        f"Source added.\n\n"
-        f"Type: <b>{'Telegram' if source_type == 'telegram' else 'VK'}</b>\n"
-        f"Channel/Group: <b>{source_id}</b>\n\n"
-        f"Check interval: every {SOURCE_MONITOR_INTERVAL_MIN} minutes.",
+        f"✅ Источник добавлен.\n\n"
+        f"Тип: <b>{'Telegram' if source_type == 'telegram' else 'ВКонтакте'}</b>\n"
+        f"Канал/группа: <b>{source_id}</b>\n\n"
+        f"<i>Бот будет проверять его каждые {SOURCE_MONITOR_INTERVAL_MIN} мин.</i>\n"
+        f"Изменения применяются только для групп с загруженным расписанием.",
         parse_mode="HTML",
     )
 

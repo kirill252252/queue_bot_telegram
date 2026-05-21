@@ -463,6 +463,23 @@ async def upsert_group(chat_id: int, group_name: str) -> int:
 # LESSONS
 # ─────────────────────────────────────────────
 
+async def get_group_lessons(group_id: int) -> list[dict]:
+    """Все активные уроки группы (для проверки наличия загруженного расписания)."""
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id FROM schedule_lessons WHERE group_id=$1 AND is_active=1 LIMIT 1",
+                group_id,
+            )
+            return [dict(r) for r in rows]
+    return await _fetchall(
+        "SELECT id FROM schedule_lessons WHERE group_id=? AND is_active=1 LIMIT 1",
+        (group_id,),
+    )
+
+
 async def get_lessons_for_day(group_id: int, weekday: int) -> list[dict]:
     if _get_db_type() == "postgres":
         from database_pg import get_pool

@@ -116,7 +116,24 @@ async def check_telegram_source(bot: Bot, source: dict, chat_id: int):
             if not any(k in text.lower() for k in _CHANGE_KEYWORDS):
                 continue
 
-            result = await parse_schedule_change(text)
+            # Ищем фото в блоке — img src или background-image
+            image_bytes = None
+            img_m = re.search(
+                r'<img[^>]+src="(https://cdn[^"]+)"',
+                block_html,
+            ) or re.search(
+                r"background-image:url\('([^']+)'\)",
+                block_html,
+            )
+            if img_m:
+                try:
+                    async with session.get(img_m.group(1)) as r:
+                        if r.status == 200:
+                            image_bytes = await r.read()
+                except Exception as img_e:
+                    logger.warning(f"TG photo download error: {img_e}")
+
+            result = await parse_schedule_change(text, image_bytes)
             if not result or not result.get("changes"):
                 continue
 
@@ -124,17 +141,23 @@ async def check_telegram_source(bot: Bot, source: dict, chat_id: int):
             applied = []
 
             for change in result["changes"]:
-                # Определяем целевые группы: по названию или все группы чата
+                # Пропускаем группы, которых нет в расписании этого чата
                 targets = resolve_target_groups(change, groups, group_lookup)
                 if not targets:
+                    # Если группа указана явно и не найдена — пропускаем тихо
                     if change.get("group"):
-                        logger.warning(
-                            "Telegram change skipped: unknown group %r",
+                        logger.debug(
+                            "Telegram change skipped (group not in chat): %r",
                             change.get("group"),
                         )
                     continue
 
                 for g in targets:
+                    # Сохраняем только если у группы уже есть загруженное расписание
+                    lessons = await sdb.get_group_lessons(g["id"])
+                    if not lessons:
+                        logger.debug("Skipping override for group %r — no base schedule", g.get("group_name"))
+                        continue
                     await sdb.save_override(g["id"], change, fallback_date=fallback_date)
 
                 action  = change.get("action") or change.get("type") or "изменение"
@@ -253,13 +276,17 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
                 targets = resolve_target_groups(change, groups, group_lookup)
                 if not targets:
                     if change.get("group"):
-                        logger.warning(
-                            "VK change skipped: unknown group %r",
+                        logger.debug(
+                            "VK change skipped (group not in chat): %r",
                             change.get("group"),
                         )
                     continue
 
                 for g in targets:
+                    lessons = await sdb.get_group_lessons(g["id"])
+                    if not lessons:
+                        logger.debug("Skipping VK override for group %r — no base schedule", g.get("group_name"))
+                        continue
                     await sdb.save_override(g["id"], change, fallback_date=fallback_date)
 
                 action  = change.get("action") or change.get("type") or "изменение"
@@ -297,11 +324,11 @@ async def close_session():
 # LOOP
 # ─────────────────────────────────────────────
 
-async def source_monitor_loop(bot: Bot, interval_minutes: int = 15):
+async def source_monitor_loop(bot: Bot, interval_minutes: int = 720):
     """
     Основной цикл мониторинга.
-    По умолчанию запускается каждые 6 часов (360 минут) —
-    расписание меняется редко, частые запросы не нужны.
+    По умолчанию запускается каждые 12 часов (720 минут).
+    Расписание меняется редко, частые запросы нагружают AI-модель.
     """
     while True:
         try:
