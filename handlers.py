@@ -832,17 +832,20 @@ async def cb_view_queue(call: CallbackQuery):
         await call.answer("Очередь не найдена.", show_alert=True)
         return
     members = await db.get_queue_members(queue_id)
-    user_in = any(m["user_id"] == call.from_user.id for m in members)
-    admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    await safe_edit_text(
-        call.message,
-        format_queue_info(queue, members),
-        reply_markup=queue_actions_keyboard(queue_id, user_in, admin, not queue["is_active"]),
-        parse_mode="HTML",
-    )
-    # регистрируем групповое сообщение-панель для авто-обновления при PM-операциях
-    if call.message.chat.type in ("group", "supergroup"):
+    is_group = call.message.chat.type in ("group", "supergroup")
+
+    if is_group:
+        # группа — нейтральная клавиатура: shared-сообщение одно на всех,
+        # персонализированные кнопки ломают UX остальных пользователей
+        kb = queue_actions_keyboard(queue_id, False, False, not queue["is_active"])
         _register_queue_panel(queue_id, call.message.chat.id, call.message.message_id)
+    else:
+        user_in = any(m["user_id"] == call.from_user.id for m in members)
+        admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
+        kb = queue_actions_keyboard(queue_id, user_in, admin, not queue["is_active"])
+
+    await safe_edit_text(call.message, format_queue_info(queue, members),
+                         reply_markup=kb, parse_mode="HTML")
     await call.answer()
 
 @router.callback_query(F.data.startswith("join:"))
@@ -875,12 +878,10 @@ async def cb_join(call: CallbackQuery):
         if member:
             await notify_approaching(call.bot, queue, member, pos)
 
-    admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
+    # нейтральная клавиатура — в группе сообщение общее для всех
     await safe_edit_text(call.message, format_queue_info(queue, members),
-                                 reply_markup=queue_actions_keyboard(queue_id, True, admin, False, user_is_first),
-                                 parse_mode="HTML")
-    # фиксируем это сообщение как актуальную панель очереди в группе
+                         reply_markup=queue_actions_keyboard(queue_id, False, False, False),
+                         parse_mode="HTML")
     _register_queue_panel(queue_id, call.message.chat.id, call.message.message_id)
 
 @router.callback_query(F.data.startswith("leave:"))
@@ -898,11 +899,9 @@ async def cb_leave(call: CallbackQuery):
         return
     await call.answer("🚪 Вышел.", show_alert=True)
     queue, members = await after_leave(call.bot, queue_id, call.from_user.id, left, was_first)
-    admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
-    user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
     await safe_edit_text(call.message, format_queue_info(queue, members),
-                                 reply_markup=queue_actions_keyboard(queue_id, False, admin, not queue["is_active"], user_is_first),
-                                 parse_mode="HTML")
+                         reply_markup=queue_actions_keyboard(queue_id, False, False, not queue["is_active"]),
+                         parse_mode="HTML")
 
 @router.callback_query(F.data == "create_queue")
 async def cb_create_queue(call: CallbackQuery, state: FSMContext):
