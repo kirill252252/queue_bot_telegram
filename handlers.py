@@ -23,7 +23,7 @@ from keyboards import (
 )
 from helpers import format_queue_info, format_queue_list, format_pm_my_queues
 from notifications import (
-    notify_became_first, notify_kicked, notify_leave_public,
+    notify_became_first, notify_kicked,
     notify_approaching, notify_slot_available,
 )
 
@@ -33,6 +33,42 @@ router = Router()
 
 # словарь chat_id -> название чата, живёт в памяти
 _chat_names: dict[int, str] = {}
+
+# последнее групповое сообщение-панель для каждой очереди: {queue_id: (chat_id, message_id)}
+# нужно чтобы при join/leave из ЛС обновлять групповую панель без кнопки «Обновить»
+_queue_panels: dict[int, tuple[int, int]] = {}
+
+
+def _register_queue_panel(queue_id: int, chat_id: int, message_id: int) -> None:
+    _queue_panels[queue_id] = (chat_id, message_id)
+
+
+async def _push_queue_update(bot: Bot, queue_id: int, skip_message_id: int | None = None) -> None:
+    """Тихо обновляет групповую панель очереди после PM-операции."""
+    entry = _queue_panels.get(queue_id)
+    if not entry:
+        return
+    chat_id, message_id = entry
+    if message_id == skip_message_id:
+        return
+    queue = await db.get_queue(queue_id)
+    if not queue:
+        return
+    members = await db.get_queue_members(queue_id)
+    # keyboard без user_in/admin — нейтральный вид; кнопка «Обновить» даёт персональный
+    kb = queue_actions_keyboard(queue_id, False, False, not queue["is_active"])
+    try:
+        await bot.edit_message_text(
+            text=format_queue_info(queue, members),
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        logger.warning("push_queue_update failed for queue %s: %s", queue_id, e)
 
 def _as_bool(value) -> bool:
     if isinstance(value, str):
@@ -111,7 +147,6 @@ async def after_leave(bot: Bot, queue_id: int, left_user_id: int,
                       left_member: dict, was_first: bool):
     queue = await db.get_queue(queue_id)
     members = await db.get_queue_members(queue_id)
-    await notify_leave_public(bot, queue, left_member, queue["chat_id"])
     if was_first and members:
         await notify_became_first(bot, queue, members[0], queue["chat_id"])
     await db.cancel_reminders(queue_id, left_user_id)
@@ -344,6 +379,8 @@ async def cb_pm_join(call: CallbackQuery):
     user_is_first = bool(members) and members[0]["user_id"] == call.from_user.id
     kb = pm_queue_actions_keyboard(queue_id, True, False, queue["chat_id"], user_is_first)
     await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
+    # обновляем групповую панель чтобы другие видели изменение без кнопки «Обновить»
+    await _push_queue_update(call.bot, queue_id)
 
 @router.callback_query(F.data.startswith("pm_leave:"))
 async def cb_pm_leave(call: CallbackQuery):
@@ -362,6 +399,7 @@ async def cb_pm_leave(call: CallbackQuery):
     text = format_queue_info(queue, members)
     kb = pm_queue_actions_keyboard(queue_id, False, not queue["is_active"], queue["chat_id"])
     await safe_edit_text(call.message, text, reply_markup=kb, parse_mode="HTML")
+    await _push_queue_update(call.bot, queue_id)
 
 @router.callback_query(F.data.startswith("confirm_ready:"))
 async def cb_confirm_ready(call: CallbackQuery):
@@ -398,6 +436,7 @@ async def cb_confirm_leave(call: CallbackQuery):
         f"🚪 Ты вышел из очереди <b>«{queue['name']}»</b>. Спасибо!",
         parse_mode="HTML"
     )
+    await _push_queue_update(call.bot, queue_id)
 
 @router.callback_query(F.data.startswith("done_next:"))
 # кнопка "я прошёл" — выходим и уведомляем следующего
@@ -417,6 +456,7 @@ async def cb_done_next(call: CallbackQuery):
         f"✅ <b>Ты прошёл очередь «{queue['name']}»!</b>\n\nСпасибо, следующий уведомлён 🎉",
         parse_mode="HTML"
     )
+    await _push_queue_update(call.bot, queue_id)
 
 @router.callback_query(F.data == "pm_home")
 async def cb_pm_home(call: CallbackQuery):
@@ -798,8 +838,11 @@ async def cb_view_queue(call: CallbackQuery):
         call.message,
         format_queue_info(queue, members),
         reply_markup=queue_actions_keyboard(queue_id, user_in, admin, not queue["is_active"]),
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
+    # регистрируем групповое сообщение-панель для авто-обновления при PM-операциях
+    if call.message.chat.type in ("group", "supergroup"):
+        _register_queue_panel(queue_id, call.message.chat.id, call.message.message_id)
     await call.answer()
 
 @router.callback_query(F.data.startswith("join:"))
@@ -837,6 +880,8 @@ async def cb_join(call: CallbackQuery):
     await safe_edit_text(call.message, format_queue_info(queue, members),
                                  reply_markup=queue_actions_keyboard(queue_id, True, admin, False, user_is_first),
                                  parse_mode="HTML")
+    # фиксируем это сообщение как актуальную панель очереди в группе
+    _register_queue_panel(queue_id, call.message.chat.id, call.message.message_id)
 
 @router.callback_query(F.data.startswith("leave:"))
 # выходим из очереди через кнопку в группе

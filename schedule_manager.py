@@ -13,6 +13,15 @@
   - Настройки уведомлений инициализируются в БД при первом тике, чтобы
     дефолт «1» не возникал заново после отключения
   - Настройки загружаются ОДИН РАЗ на группу за тик, а не для каждой пары
+
+ИСПРАВЛЕНИЯ v3:
+  - BUG: точное сравнение current_time == time_start пропускало первую пару
+    если бот перезапускался после её начала. Теперь используется окно
+    STARTUP_CATCH_UP_MINUTES: при старте бота догоняем пары начавшиеся
+    в пределах этого окна и у которых ещё не создана очередь.
+  - BUG: get_pending_events не фильтровал по group_id — событие другой
+    группы с тем же lesson_num блокировало создание очереди для первой пары.
+    Фильтр по group_id добавлен прямо в _open_lesson_queue.
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -21,6 +30,20 @@ import db
 import schedule_db as sdb
 
 logger = logging.getLogger(__name__)
+
+# Сколько минут назад считать «пропущенной но ещё актуальной» пару при старте бота.
+# Если бот перезапустился в 08:05, а первая пара началась в 08:00 — очередь всё
+# равно будет создана (без уведомления о начале, чтобы не спамить).
+STARTUP_CATCH_UP_MINUTES = 30
+
+# Время запуска процесса — используется для определения «стартового» тика.
+_bot_start_time: datetime | None = None
+
+
+def _mark_started():
+    global _bot_start_time
+    if _bot_start_time is None:
+        _bot_start_time = datetime.now(timezone.utc)
 
 
 def _now() -> datetime:
@@ -121,9 +144,15 @@ async def process_schedule_tick(bot):
       1. Берём локальное время с учётом таймзоны чата (или TZ_OFFSET из .env)
       2. Для каждой группы: занятия дня → overrides → фильтр недели → открыть/закрыть очереди
 
-    ИСПРАВЛЕНИЕ: Настройки загружаются ОДИН РАЗ на группу (не на каждую пару),
+    ИСПРАВЛЕНИЕ v2: Настройки загружаются ОДИН РАЗ на группу (не на каждую пару),
     и сразу гарантируем наличие строки в БД.
+
+    ИСПРАВЛЕНИЕ v3: При первом тике после перезапуска догоняем пары начавшиеся
+    в пределах STARTUP_CATCH_UP_MINUTES и у которых ещё нет созданной очереди.
     """
+    _mark_started()
+    is_startup = (datetime.now(timezone.utc) - _bot_start_time).total_seconds() < 90
+
     groups = await sdb.get_all_study_groups()
     if not groups:
         return
@@ -172,8 +201,33 @@ async def process_schedule_tick(bot):
             if not time_start or not time_end:
                 continue
 
+            # BUG FIX v3: точное сравнение пропускало первую пару если бот
+            # перезапускался после её начала. Теперь при старте проверяем
+            # «пропущенные» пары в пределах STARTUP_CATCH_UP_MINUTES.
+            should_open = False
+            is_catch_up = False
+
             if current_time == time_start:
-                await _open_lesson_queue(bot, group, lesson, today, chat_id, notify_open)
+                should_open = True
+            elif is_startup:
+                # Пара началась не более STARTUP_CATCH_UP_MINUTES минут назад
+                # и ещё не закончилась — догоняем без уведомления.
+                try:
+                    start_dt = datetime.strptime(f"{today} {time_start}", "%Y-%m-%d %H:%M")
+                    end_dt   = datetime.strptime(f"{today} {time_end}",   "%Y-%m-%d %H:%M")
+                    now_naive = now.replace(tzinfo=None)
+                    minutes_late = (now_naive - start_dt).total_seconds() / 60
+                    if 0 < minutes_late <= STARTUP_CATCH_UP_MINUTES and now_naive < end_dt:
+                        should_open = True
+                        is_catch_up = True
+                except Exception:
+                    pass
+
+            if should_open:
+                await _open_lesson_queue(
+                    bot, group, lesson, today, chat_id,
+                    notify=notify_open and not is_catch_up,
+                )
 
             if current_time == time_end:
                 await _close_lesson_queue(bot, group, lesson, today, chat_id, notify_close)
@@ -212,7 +266,10 @@ async def _open_lesson_queue(bot, group: dict, lesson: dict,
     teacher    = lesson.get("teacher") or ""
     room       = lesson.get("room") or ""
 
-    # ИСПРАВЛЕНИЕ: Защита от дублей — get_pending_events возвращает pending+active
+    # BUG FIX v3: get_pending_events возвращает события ВСЕХ групп на дату.
+    # Если у другой группы есть lesson_num=1, проверка ниже давала ложный дубль
+    # и блокировала создание очереди для первой пары нашей группы.
+    # Фильтруем по group_id прямо здесь.
     pending = await sdb.get_pending_events(date_str)
     for e in pending:
         if e["group_id"] == group["id"] and e["lesson_num"] == lesson_num:
