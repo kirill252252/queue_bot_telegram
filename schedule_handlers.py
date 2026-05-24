@@ -461,15 +461,18 @@ async def fsm_receive_source(message: Message, state: FSMContext):
     data        = await state.get_data()
     chat_id     = data["chat_id"]
     source_type = data["source_type"]
-    source_id   = message.text.strip().lstrip("@")
+    raw = message.text.strip()
     await state.clear()
 
-    if not source_id:
+    if not raw:
         await message.answer("Пустое значение. Попробуй снова через /schedule.")
         return
 
     if source_type == "telegram":
-        source_id = "@" + source_id
+        source_id = "@" + raw.lstrip("@")
+    else:
+        # принимаем https://vk.com/slug, vk.com/slug, @slug, slug
+        source_id = re.sub(r"^https?://(www\.)?vk\.com/", "", raw).lstrip("@").strip()
 
     await sdb.add_source(chat_id, source_type, source_id)
     await message.answer(
