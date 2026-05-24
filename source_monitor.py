@@ -205,7 +205,9 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
     try:
         session = await get_session()
 
-        raw_id = source_id.lstrip("@").strip()
+        raw_id = source_id.strip()
+        # strip full URL if stored as https://vk.com/slug
+        raw_id = re.sub(r"^https?://(www\.)?vk\.com/", "", raw_id).lstrip("@").strip()
         # числовой ID (положительный или отрицательный) → owner_id, не domain
         if re.fullmatch(r"-?\d+", raw_id):
             wall_params = {"owner_id": raw_id, "count": 20, "access_token": vk_token, "v": "5.131"}
