@@ -192,6 +192,8 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
     BUG FIX 1: group_map не использовался в VK — изменения применялись ко ВСЕМ
     группам чата вместо нужной. Исправлено: сопоставляем по change["group"].
     BUG FIX 2: applied.append был вне цикла по группам → дублирование записей.
+    BUG FIX 3: числовой source_id передавался как domain → VK error 100.
+    Исправлено: числовые ID → owner_id, строковые → domain.
     """
     vk_token = os.getenv("VK_TOKEN")
     if not vk_token:
@@ -203,14 +205,18 @@ async def check_vk_source(bot: Bot, source: dict, chat_id: int):
     try:
         session = await get_session()
 
+        raw_id = source_id.lstrip("@").strip()
+        # числовой ID (положительный или отрицательный) → owner_id, не domain
+        if re.fullmatch(r"-?\d+", raw_id):
+            wall_params = {"owner_id": raw_id, "count": 20, "access_token": vk_token, "v": "5.131"}
+        else:
+            wall_params = {"domain": raw_id, "count": 20, "access_token": vk_token, "v": "5.131"}
+
+        logger.debug("VK wall.get params: %s", {k: v for k, v in wall_params.items() if k != "access_token"})
+
         async with session.get(
             "https://api.vk.com/method/wall.get",
-            params={
-                "domain":       source_id,
-                "count":        20,          # Берём больше постов
-                "access_token": vk_token,
-                "v":            "5.131",
-            },
+            params=wall_params,
         ) as resp:
             data = await resp.json()
 
