@@ -370,6 +370,8 @@ async def cb_pm_join(call: CallbackQuery):
         return
 
     await call.answer(f"✅ Место #{pos} занято!", show_alert=True)
+    # регистрируем связь чтобы пользователь мог ставить ник через ЛС
+    await db.register_user_chat(u.id, queue["chat_id"])
     if pos == 1:
         members = await db.get_queue_members(queue_id)
         await notify_became_first(call.bot, queue, members[0], queue["chat_id"])
@@ -870,6 +872,8 @@ async def cb_join(call: CallbackQuery):
         return
 
     await call.answer(f"✅ Место #{pos} занято!", show_alert=True)
+    # регистрируем связь чтобы пользователь мог ставить ник через ЛС
+    await db.register_user_chat(u.id, call.message.chat.id)
     members = await db.get_queue_members(queue_id)
     if pos == 1:
         await notify_became_first(call.bot, queue, members[0], call.message.chat.id)
@@ -1272,6 +1276,7 @@ async def cmd_start_invite(message: Message):
             await message.answer(f"Ты уже стоишь в очереди «{queue['name']}»!")
             return
 
+        await db.register_user_chat(u.id, queue["chat_id"])
         await message.answer(
             f"✅ <b>Ты встал в очередь «{queue['name']}»!</b>\n\n"
             f"Твоё место: <b>#{pos}</b>\n"
