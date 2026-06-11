@@ -129,6 +129,9 @@ class BroadcastState(StatesGroup):
 class AdmSetRemind(StatesGroup):
     minutes = State()
 
+class AdmAddMember(StatesGroup):
+    waiting_for_user = State()
+
 # проверяем является ли юзер админом — Telegram-права, бот-права или владелец
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     from config import BOT_OWNER_ID
@@ -1927,7 +1930,139 @@ async def cb_adm_export(call: CallbackQuery):
         BufferedInputFile(csv_bytes, filename=fname),
         caption=f"📥 <b>{queue['name']}</b> - {len(members)} участников",
         parse_mode="HTML"
+
+
+# ─────────────────────────────── FORCE-ADD MEMBER ────────────────────────────
+
+@router.callback_query(F.data.startswith("adm_add_member:"))
+async def cb_adm_add_member(call: CallbackQuery, state: FSMContext):
+    queue_id = int(call.data.split(":")[1])
+    queue = await db.get_queue(queue_id)
+    if not queue or not await is_admin(call.bot, queue["chat_id"], call.from_user.id):
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    if not queue["is_active"]:
+        await call.answer("Очередь закрыта.", show_alert=True)
+        return
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Отмена", callback_data=f"adm_queue:{queue_id}")
+    ]])
+    await state.update_data(queue_id=queue_id, msg_id=call.message.message_id)
+    await state.set_state(AdmAddMember.waiting_for_user)
+    await safe_edit_text(
+        call.message,
+        f"Добавить участника в {queue['name']}
+
+"
+        "Перешли любое сообщение от нужного пользователя "
+        "или напиши его @username:",
+        reply_markup=kb, parse_mode="HTML"
     )
+    await call.answer()
+
+
+@router.message(AdmAddMember.waiting_for_user)
+async def fsm_adm_add_member(message: Message, state: FSMContext):
+    data = await state.get_data()
+    queue_id = data["queue_id"]
+    queue = await db.get_queue(queue_id)
+    if not queue:
+        await state.clear()
+        return
+
+    target_id = None
+    target_name = ""
+    target_username = ""
+
+    if message.forward_from:
+        u = message.forward_from
+        target_id = u.id
+        target_name = u.full_name or u.username or str(u.id)
+        target_username = u.username or ""
+    elif message.text and message.text.strip().startswith("@"):
+        username = message.text.strip().lstrip("@")
+        try:
+            chat = await message.bot.get_chat(f"@{username}")
+            target_id = chat.id
+            target_name = chat.full_name or username
+            target_username = chat.username or ""
+        except Exception:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Отмена", callback_data=f"adm_queue:{queue_id}")
+            ]])
+            await message.answer(
+                f"Пользователь @{username} не найден или недоступен.
+
+"
+                "Попробуй переслать сообщение от него:",
+                reply_markup=kb
+            )
+            return
+    elif message.text and message.text.strip().lstrip("-").isdigit():
+        uid = int(message.text.strip())
+        try:
+            chat = await message.bot.get_chat(uid)
+            target_id = chat.id
+            target_name = chat.full_name or str(uid)
+            target_username = chat.username or ""
+        except Exception:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Отмена", callback_data=f"adm_queue:{queue_id}")
+            ]])
+            await message.answer(
+                f"Пользователь {uid} не найден. Попробуй переслать сообщение от него:",
+                reply_markup=kb
+            )
+            return
+    else:
+        await message.answer(
+            "Перешли сообщение от пользователя или напиши @username / user_id."
+        )
+        return
+
+    await state.clear()
+
+    try:
+        member = await message.bot.get_chat_member(queue["chat_id"], target_id)
+        if member.status in ("left", "kicked"):
+            await message.answer(
+                f"{target_name} не состоит в группе и не может быть добавлен."
+            )
+            return
+    except Exception:
+        await message.answer(
+            "Не удалось проверить членство в группе. "
+            "Убедись что пользователь состоит в чате и попробуй снова."
+        )
+        return
+
+    if queue["max_slots"] > 0 and await db.get_member_count(queue_id) >= queue["max_slots"]:
+        await message.answer("Все места заняты.")
+        return
+
+    await db.upsert_user(target_id, target_name, target_username)
+    display = await db.resolve_display_name(target_id, queue["chat_id"], target_name)
+    pos = await db.join_queue(queue_id, target_id, display, target_username)
+
+    if pos == -1:
+        await message.answer(f"{target_name} уже стоит в этой очереди.")
+        return
+
+    await db.register_user_chat(target_id, queue["chat_id"])
+
+    members = await db.get_queue_members(queue_id)
+    if pos == 1:
+        await notify_became_first(message.bot, queue, members[0], queue["chat_id"])
+
+    await message.answer(
+        f"{display} добавлен на место #{pos} в {queue['name']}.",
+        parse_mode="HTML"
+    )
+    await _push_queue_update(message.bot, queue_id)
+
 
 
 @router.callback_query(F.data.startswith("adm_clone:"))

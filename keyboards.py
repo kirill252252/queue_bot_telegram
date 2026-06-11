@@ -269,8 +269,12 @@ def admin_queue_actions_keyboard(queue_id: int, chat_id: int,
             InlineKeyboardButton(text="🔒 Закрыть",  callback_data=f"adm_close:{queue_id}"),
             InlineKeyboardButton(text="🗑 Удалить",  callback_data=f"adm_delete:{queue_id}"),
         ])
-        buttons.append([InlineKeyboardButton(text="👢 Кикнуть участника",
-                                              callback_data=f"adm_kick_menu:{queue_id}")])
+        buttons.append([
+            InlineKeyboardButton(text="👢 Кикнуть участника",
+                                 callback_data=f"adm_kick_menu:{queue_id}"),
+            InlineKeyboardButton(text="➕ Добавить участника",
+                                 callback_data=f"adm_add_member:{queue_id}"),
+        ])
         buttons.append([InlineKeyboardButton(text="🔗 Ссылка-приглашение",
                                               callback_data=f"adm_invite:{queue_id}")])
     buttons.append([
