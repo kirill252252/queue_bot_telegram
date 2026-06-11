@@ -682,6 +682,23 @@ async def get_active_events(date_str: str) -> list[dict]:
     """, (date_str,))
 
 
+async def get_closed_events_today(date_str: str) -> list[dict]:
+    """Закрытые события на дату — защита от повторного открытия очереди."""
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM schedule_events WHERE date=$1 AND status='closed'",
+                date_str
+            )
+            return [dict(r) for r in rows]
+    return await _fetchall(
+        "SELECT * FROM schedule_events WHERE date=? AND status='closed'",
+        (date_str,)
+    )
+
+
 async def create_schedule_event(group_id: int, chat_id: int, date: str,
                                  lesson_num: int, subject: str,
                                  time_start: str, time_end: str) -> int:

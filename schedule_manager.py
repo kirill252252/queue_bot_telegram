@@ -31,20 +31,6 @@ import schedule_db as sdb
 
 logger = logging.getLogger(__name__)
 
-# Сколько минут назад считать «пропущенной но ещё актуальной» пару при старте бота.
-# Если бот перезапустился в 08:05, а первая пара началась в 08:00 — очередь всё
-# равно будет создана (без уведомления о начале, чтобы не спамить).
-STARTUP_CATCH_UP_MINUTES = 30
-
-# Время запуска процесса — используется для определения «стартового» тика.
-_bot_start_time: datetime | None = None
-
-
-def _mark_started():
-    global _bot_start_time
-    if _bot_start_time is None:
-        _bot_start_time = datetime.now(timezone.utc)
-
 
 def _now() -> datetime:
     """Глобальное локальное время (fallback на TZ_OFFSET из .env)."""
@@ -150,9 +136,6 @@ async def process_schedule_tick(bot):
     ИСПРАВЛЕНИЕ v3: При первом тике после перезапуска догоняем пары начавшиеся
     в пределах STARTUP_CATCH_UP_MINUTES и у которых ещё нет созданной очереди.
     """
-    _mark_started()
-    is_startup = (datetime.now(timezone.utc) - _bot_start_time).total_seconds() < 90
-
     groups = await sdb.get_all_study_groups()
     if not groups:
         return
@@ -201,27 +184,25 @@ async def process_schedule_tick(bot):
             if not time_start or not time_end:
                 continue
 
-            # BUG FIX v3: точное сравнение пропускало первую пару если бот
-            # перезапускался после её начала. Теперь при старте проверяем
-            # «пропущенные» пары в пределах STARTUP_CATCH_UP_MINUTES.
+            # BUG FIX v4: заменяем точное сравнение HH:MM на диапазон.
+            # Тик мог опоздать на 1-2 минуты (asyncio.sleep неточен + время
+            # на выполнение тика) и пропустить первую пару навсегда.
+            # Теперь очередь открывается если пара идёт прямо сейчас
+            # и ещё не была создана (защита от дублей — в _open_lesson_queue).
             should_open = False
             is_catch_up = False
 
-            if current_time == time_start:
-                should_open = True
-            elif is_startup:
-                # Пара началась не более STARTUP_CATCH_UP_MINUTES минут назад
-                # и ещё не закончилась — догоняем без уведомления.
-                try:
-                    start_dt = datetime.strptime(f"{today} {time_start}", "%Y-%m-%d %H:%M")
-                    end_dt   = datetime.strptime(f"{today} {time_end}",   "%Y-%m-%d %H:%M")
-                    now_naive = now.replace(tzinfo=None)
-                    minutes_late = (now_naive - start_dt).total_seconds() / 60
-                    if 0 < minutes_late <= STARTUP_CATCH_UP_MINUTES and now_naive < end_dt:
-                        should_open = True
-                        is_catch_up = True
-                except Exception:
-                    pass
+            try:
+                start_dt  = datetime.strptime(f"{today} {time_start}", "%Y-%m-%d %H:%M")
+                end_dt    = datetime.strptime(f"{today} {time_end}",   "%Y-%m-%d %H:%M")
+                now_naive = now.replace(tzinfo=None)
+
+                if start_dt <= now_naive < end_dt:
+                    should_open = True
+                    # Если опоздали хотя бы на минуту — без уведомления
+                    is_catch_up = (now_naive - start_dt).total_seconds() >= 60
+            except Exception:
+                pass
 
             if should_open:
                 await _open_lesson_queue(
@@ -277,6 +258,13 @@ async def _open_lesson_queue(bot, group: dict, lesson: dict,
                 "Skipping duplicate queue for group %s lesson %s on %s (status=%s)",
                 group["id"], lesson_num, date_str, e.get("status")
             )
+            return
+
+    # BUG FIX v4: если очередь уже была создана и закрыта (вручную или по времени)
+    # — не пересоздаём, иначе диапазонная проверка будет открывать её снова.
+    closed = await sdb.get_closed_events_today(date_str)
+    for e in closed:
+        if e["group_id"] == group["id"] and e["lesson_num"] == lesson_num:
             return
 
     desc_parts = []
