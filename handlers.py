@@ -1930,6 +1930,7 @@ async def cb_adm_export(call: CallbackQuery):
         BufferedInputFile(csv_bytes, filename=fname),
         caption=f"📥 <b>{queue['name']}</b> - {len(members)} участников",
         parse_mode="HTML"
+    )
 
 
 # ─────────────────────────────── FORCE-ADD MEMBER ────────────────────────────
@@ -1952,10 +1953,8 @@ async def cb_adm_add_member(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdmAddMember.waiting_for_user)
     await safe_edit_text(
         call.message,
-        f"Добавить участника в {queue['name']}
-
-"
-        "Перешли любое сообщение от нужного пользователя "
+        f"➕ <b>Добавить участника в «{queue['name']}»</b>\n\n"
+        "Перешли любое сообщение от нужного пользователя\n"
         "или напиши его @username:",
         reply_markup=kb, parse_mode="HTML"
     )
@@ -1993,10 +1992,7 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
                 InlineKeyboardButton(text="Отмена", callback_data=f"adm_queue:{queue_id}")
             ]])
             await message.answer(
-                f"Пользователь @{username} не найден или недоступен.
-
-"
-                "Попробуй переслать сообщение от него:",
+                "Пользователь @" + username + " не найден или недоступен.\n\nПопробуй переслать сообщение от него:",
                 reply_markup=kb
             )
             return
