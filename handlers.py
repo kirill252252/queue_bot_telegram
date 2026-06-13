@@ -3,7 +3,7 @@ import io
 import logging
 
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -133,17 +133,30 @@ class AdmAddMember(StatesGroup):
     waiting_for_user = State()
 
 # проверяем является ли юзер админом — Telegram-права, бот-права или владелец
+# TTL-кэш для is_admin: избегаем лишних вызовов Telegram API (44+ в хендлерах).
+# Кэшируем результат на 60 секунд — достаточно для интерактивных сценариев.
+import time as _time
+_admin_cache: dict[tuple, tuple[bool, float]] = {}
+_ADMIN_CACHE_TTL = 60.0
+
+
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     from config import BOT_OWNER_ID
     if user_id == BOT_OWNER_ID:
         return True
     if await db.is_bot_admin(user_id, chat_id):
         return True
+    key = (chat_id, user_id)
+    cached = _admin_cache.get(key)
+    if cached and (_time.monotonic() - cached[1]) < _ADMIN_CACHE_TTL:
+        return cached[0]
     try:
         m = await bot.get_chat_member(chat_id, user_id)
-        return m.status in ("administrator", "creator")
+        result = m.status in ("administrator", "creator")
     except Exception:
-        return False
+        result = False
+    _admin_cache[key] = (result, _time.monotonic())
+    return result
 
 # общая логика после выхода из очереди — уведомления, следующий
 async def after_leave(bot: Bot, queue_id: int, left_user_id: int,
@@ -506,8 +519,6 @@ async def cb_pm_myqueues(call: CallbackQuery):
     lines = ["📋 <b>Твои активные очереди:</b>\n"]
     for e in entries:
         lines.append(f"💬 {e['chat_name']}\n   └ <b>{e['queue_name']}</b> - место <b>#{e['position']}</b>")
-
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     buttons = []
     for e in entries:
         buttons.append([InlineKeyboardButton(
@@ -534,7 +545,6 @@ async def reply_myqueues(message: Message):
             "Ты пока не стоишь ни в одной очереди.\n\nНажми «🔍 Найти очередь» чтобы записаться."
         )
         return
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     lines = ["📋 <b>Твои активные очереди:</b>\n"]
     buttons = []
     for e in entries:
@@ -1634,7 +1644,6 @@ async def cb_adm_queues(call: CallbackQuery):
     queues = await db.get_chat_queues(chat_id)
     chat_name = _chat_names.get(chat_id, f"Чат {chat_id}")
     if not queues:
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Создать очередь", callback_data=f"adm_create:{chat_id}")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")],
@@ -1785,7 +1794,6 @@ async def cb_adm_close(call: CallbackQuery):
     if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
         await call.answer("❌", show_alert=True)
         return
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Да, закрыть", callback_data=f"adm_confirm_close:{queue_id}"),
         InlineKeyboardButton(text="❌ Отмена",       callback_data=f"adm_queue:{queue_id}"),
@@ -1818,7 +1826,6 @@ async def cb_adm_delete(call: CallbackQuery):
     if not q or not await is_admin(call.bot, q["chat_id"], call.from_user.id):
         await call.answer("❌", show_alert=True)
         return
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"adm_confirm_delete:{queue_id}"),
         InlineKeyboardButton(text="❌ Отмена",       callback_data=f"adm_queue:{queue_id}"),
@@ -1945,7 +1952,6 @@ async def cb_adm_add_member(call: CallbackQuery, state: FSMContext):
     if not queue["is_active"]:
         await call.answer("Очередь закрыта.", show_alert=True)
         return
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Отмена", callback_data=f"adm_queue:{queue_id}")
     ]])
@@ -1974,11 +1980,28 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
     target_name = ""
     target_username = ""
 
+    def _cancel_kb():
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm_queue:{queue_id}")
+        ]])
+
     if message.forward_from:
+        # Профиль открыт — forward_from содержит полные данные
         u = message.forward_from
         target_id = u.id
         target_name = u.full_name or u.username or str(u.id)
         target_username = u.username or ""
+    elif message.forward_origin:
+        # Профиль скрыт — Telegram скрыл отправителя, user_id недоступен через Bot API.
+        # Единственный выход: попросить пользователя написать боту /start в ЛС,
+        # после этого добавлять по user_id.
+        await message.answer(
+            "❌ У этого пользователя скрыт профиль — Telegram не передаёт его данные.\n\n"
+            "Попроси его написать /start боту в личку, "
+            "после этого добавь его по user_id (число в строке).",
+            reply_markup=_cancel_kb()
+        )
+        return
     elif message.text and message.text.strip().startswith("@"):
         username = message.text.strip().lstrip("@")
         try:
@@ -1987,15 +2010,11 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
             target_name = chat.full_name or username
             target_username = chat.username or ""
         except Exception:
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Отмена", callback_data=f"adm_queue:{queue_id}")
-            ]])
             await message.answer(
-                "Пользователь @" + username + " не найден или недоступен.\n\nПопробуй переслать сообщение от него:",
-                reply_markup=kb
+                "❌ Пользователь @" + username + " не найден или недоступен.\n\nПопробуй переслать сообщение от него:",
+                reply_markup=_cancel_kb()
             )
-            return
+            return  # state НЕ сбрасываем — ждём следующей попытки
     elif message.text and message.text.strip().lstrip("-").isdigit():
         uid = int(message.text.strip())
         try:
@@ -2004,20 +2023,17 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
             target_name = chat.full_name or str(uid)
             target_username = chat.username or ""
         except Exception:
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Отмена", callback_data=f"adm_queue:{queue_id}")
-            ]])
             await message.answer(
-                f"Пользователь {uid} не найден. Попробуй переслать сообщение от него:",
-                reply_markup=kb
+                f"❌ Пользователь {uid} не найден.\n\nПопробуй переслать сообщение от него:",
+                reply_markup=_cancel_kb()
             )
-            return
+            return  # state НЕ сбрасываем — ждём следующей попытки
     else:
         await message.answer(
-            "Перешли сообщение от пользователя или напиши @username / user_id."
+            "❓ Перешли сообщение от пользователя или напиши @username / user_id.",
+            reply_markup=_cancel_kb()
         )
-        return
+        return  # state НЕ сбрасываем — ждём правильного ввода
 
     await state.clear()
 
@@ -2100,7 +2116,6 @@ async def cb_adm_stats(call: CallbackQuery):
         status = "🟢" if q["is_active"] else "🔴"
         lines.append(f"{status} <b>{q['name']}</b> - {len(members)} чел.")
     lines.append(f"\n👥 Всего в очередях: <b>{total_members}</b>")
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")
     ]])
@@ -2128,7 +2143,6 @@ _TZ_PRESETS = [
 
 
 def _tz_keyboard(chat_id: int, current_tz: str | None) -> "InlineKeyboardMarkup":
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     rows = []
     for tz_val, tz_label in _TZ_PRESETS:
         mark = " ✅" if tz_val == current_tz else ""
@@ -2198,7 +2212,6 @@ async def cb_adm_admins(call: CallbackQuery):
             lines.append(f"• {name}{uname}")
     else:
         lines.append("Бот-администраторов нет.\n\nЧтобы добавить - используй /addadmin @username в группе.")
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_home:{chat_id}")
     ]])
@@ -2213,7 +2226,6 @@ async def cmd_broadcast(message: Message, state: FSMContext):
     if message.from_user.id != BOT_OWNER_ID:
         await message.answer("❌ Только владелец бота.")
         return
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Всем пользователям", callback_data="broadcast_all")],
         [InlineKeyboardButton(text="💬 В группу", callback_data="broadcast_group")],
@@ -2252,8 +2264,6 @@ async def cb_broadcast_group(call: CallbackQuery, state: FSMContext):
     if not chats:
         await call.answer("Нет известных групп.", show_alert=True)
         return
-
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     buttons = [[InlineKeyboardButton(
         text=f"💬 {c.get('title') or c['chat_id']}",
         callback_data=f"broadcast_to:{c['chat_id']}"
