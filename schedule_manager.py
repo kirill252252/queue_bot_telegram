@@ -123,6 +123,66 @@ async def _ensure_settings_initialized(chat_id: int) -> dict:
 # MAIN TICK
 # ─────────────────────────────────────────────
 
+
+# ─────────────────────────────────────────────
+# MERGE CONSECUTIVE IDENTICAL LESSONS
+# ─────────────────────────────────────────────
+
+def _normalize_subject(s: str) -> str:
+    """Нормализуем название предмета для сравнения (без учёта регистра и пробелов)."""
+    return (s or "").strip().lower()
+
+
+def _merge_consecutive_lessons(lessons: list[dict]) -> list[dict]:
+    """
+    Объединяем подряд идущие пары с одинаковым предметом в одну.
+
+    Критерий слияния: два занятия считаются «одинаковыми подряд идущими» если:
+      - одинаковый subject (без учёта регистра)
+      - time_start следующей == time_end предыдущей (пары вплотную)
+        ИЛИ разница ≤ 10 минут (короткий перерыв между «сдвоенными» парами)
+
+    Результирующая запись:
+      - lesson_num берётся от ПЕРВОЙ пары (для привязки событий в БД)
+      - merged_lesson_nums — список всех объединённых номеров (для дубль-проверки)
+      - time_start от первой, time_end от последней
+      - teacher/room от первой (если отличаются — игнорируем, редкий кейс)
+    """
+    if not lessons:
+        return []
+
+    merged: list[dict] = []
+    i = 0
+    while i < len(lessons):
+        current = dict(lessons[i])
+        current.setdefault("merged_lesson_nums", [current["lesson_num"]])
+        j = i + 1
+        while j < len(lessons):
+            nxt = lessons[j]
+            same_subject = (
+                _normalize_subject(current["subject"]) ==
+                _normalize_subject(nxt["subject"])
+            )
+            if not same_subject:
+                break
+            # Проверяем что пары идут вплотную (≤ 10 минут между концом и началом)
+            try:
+                end_dt   = datetime.strptime(current["time_end"],  "%H:%M")
+                start_dt = datetime.strptime(nxt["time_start"],    "%H:%M")
+                gap_min  = (start_dt - end_dt).total_seconds() / 60
+            except Exception:
+                break
+            if gap_min < 0 or gap_min > 10:
+                break
+            # Сливаем: расширяем конец, добавляем номер
+            current["time_end"] = nxt["time_end"]
+            current["merged_lesson_nums"].append(nxt["lesson_num"])
+            j += 1
+        merged.append(current)
+        i = j
+    return merged
+
+
 async def process_schedule_tick(bot):
     """
     Запускается каждую минуту из background_loop.
@@ -159,6 +219,9 @@ async def process_schedule_tick(bot):
 
         # Фильтр по типу недели и мероприятиям
         effective = sdb.filter_by_week_type(effective)
+
+        # Объединяем подряд идущие одинаковые пары в одну очередь
+        effective = _merge_consecutive_lessons(effective)
 
         # ИСПРАВЛЕНИЕ: загружаем настройки ОДИН РАЗ для группы
         settings = await _ensure_settings_initialized(chat_id)
@@ -210,6 +273,7 @@ async def process_schedule_tick(bot):
                     notify=notify_open and not is_catch_up,
                 )
 
+            # Закрываем по time_end последней пары в блоке
             if current_time == time_end:
                 await _close_lesson_queue(bot, group, lesson, today, chat_id, notify_close)
 
@@ -239,32 +303,34 @@ async def process_schedule_tick(bot):
 async def _open_lesson_queue(bot, group: dict, lesson: dict,
                              date_str: str, chat_id: int,
                              notify: bool = True):
-    """Создаём очередь для пары если её ещё нет."""
+    """Создаём очередь для пары если её ещё нет.
+
+    Поддерживает объединённые пары: если lesson содержит merged_lesson_nums,
+    проверяем дубли по ВСЕМ номерам и создаём одну очередь на весь блок.
+    """
     subject    = lesson["subject"]
-    lesson_num = lesson["lesson_num"]
+    lesson_num = lesson["lesson_num"]  # номер первой (главной) пары в блоке
     time_start = lesson["time_start"]
     time_end   = lesson["time_end"]
     teacher    = lesson.get("teacher") or ""
     room       = lesson.get("room") or ""
+    merged_nums: list = lesson.get("merged_lesson_nums", [lesson_num])
 
-    # BUG FIX v3: get_pending_events возвращает события ВСЕХ групп на дату.
-    # Если у другой группы есть lesson_num=1, проверка ниже давала ложный дубль
-    # и блокировала создание очереди для первой пары нашей группы.
-    # Фильтруем по group_id прямо здесь.
+    # Дубль-проверка: если хотя бы для одного из объединённых номеров уже
+    # есть pending/active событие этой группы — пропускаем весь блок.
     pending = await sdb.get_pending_events(date_str)
     for e in pending:
-        if e["group_id"] == group["id"] and e["lesson_num"] == lesson_num:
+        if e["group_id"] == group["id"] and e["lesson_num"] in merged_nums:
             logger.debug(
-                "Skipping duplicate queue for group %s lesson %s on %s (status=%s)",
-                group["id"], lesson_num, date_str, e.get("status")
+                "Skipping duplicate queue for group %s lessons %s on %s (status=%s)",
+                group["id"], merged_nums, date_str, e.get("status")
             )
             return
 
-    # BUG FIX v4: если очередь уже была создана и закрыта (вручную или по времени)
-    # — не пересоздаём, иначе диапазонная проверка будет открывать её снова.
+    # BUG FIX v4: аналогично для закрытых событий.
     closed = await sdb.get_closed_events_today(date_str)
     for e in closed:
-        if e["group_id"] == group["id"] and e["lesson_num"] == lesson_num:
+        if e["group_id"] == group["id"] and e["lesson_num"] in merged_nums:
             return
 
     desc_parts = []
@@ -275,27 +341,36 @@ async def _open_lesson_queue(bot, group: dict, lesson: dict,
     wt         = sdb.get_current_week_type()
     week_label = {1: " (нечётная)", 2: " (чётная)"}.get(wt, "")
 
+    # Название очереди: для сдвоенных показываем диапазон номеров
+    if len(merged_nums) > 1:
+        num_label = f"{merged_nums[0]}–{merged_nums[-1]}"
+    else:
+        num_label = str(lesson_num)
+
     queue_id = await db.create_queue(
-        chat_id=chat_id, name=f"Пара {lesson_num}: {subject}",
+        chat_id=chat_id, name=f"Пара {num_label}: {subject}",
         description=" | ".join(desc_parts), max_slots=0,
         created_by=0, remind_timeout_min=10,
         notify_leave_public=False, auto_kick=False,
     )
 
-    event_id = await sdb.create_schedule_event(
-        group_id=group["id"], chat_id=chat_id, date=date_str,
-        lesson_num=lesson_num, subject=subject,
-        time_start=time_start, time_end=time_end,
-    )
-    await sdb.update_event_queue(event_id, queue_id)
-    await sdb.update_event_status(event_id, "active")
+    # Создаём event-записи для каждого номера пары в блоке.
+    # Первый event — главный (к нему привязан queue_id), остальные — ссылочные.
+    for idx, num in enumerate(merged_nums):
+        event_id = await sdb.create_schedule_event(
+            group_id=group["id"], chat_id=chat_id, date=date_str,
+            lesson_num=num, subject=subject,
+            time_start=time_start, time_end=time_end,
+        )
+        if idx == 0:
+            await sdb.update_event_queue(event_id, queue_id)
+        await sdb.update_event_status(event_id, "active")
 
-    # ИСПРАВЛЕНИЕ: notify передаётся извне — настройки уже загружены единожды
     if notify:
         try:
             await bot.send_message(
                 chat_id,
-                f"🔔 <b>Начинается пара {lesson_num}!</b>{week_label}\n\n"
+                f"🔔 <b>Начинается пара {num_label}!</b>{week_label}\n\n"
                 f"📚 <b>{subject}</b>\n⏰ {time_start}–{time_end}"
                 + (f"\n👤 {teacher}" if teacher else "")
                 + (f"\n🏫 Ауд. {room}" if room else "")
@@ -313,28 +388,36 @@ async def _open_lesson_queue(bot, group: dict, lesson: dict,
 async def _close_lesson_queue(bot, group: dict, lesson: dict,
                               date_str: str, chat_id: int,
                               notify: bool = True):
-    """Закрываем очередь по окончании пары."""
+    """Закрываем очередь по окончании пары (или блока сдвоенных пар)."""
+    merged_nums: list = lesson.get("merged_lesson_nums", [lesson["lesson_num"]])
     lesson_num = lesson["lesson_num"]
     subject    = lesson["subject"]
 
+    if len(merged_nums) > 1:
+        num_label = f"{merged_nums[0]}–{merged_nums[-1]}"
+    else:
+        num_label = str(lesson_num)
+
     active = await sdb.get_active_events(date_str)
+    closed_queue_ids: set = set()
     for event in active:
-        if event["group_id"] == group["id"] and event["lesson_num"] == lesson_num:
-            if event.get("queue_id"):
-                await db.close_queue(event["queue_id"])
+        if event["group_id"] == group["id"] and event["lesson_num"] in merged_nums:
+            qid = event.get("queue_id")
+            if qid and qid not in closed_queue_ids:
+                await db.close_queue(qid)
+                closed_queue_ids.add(qid)
             await sdb.update_event_status(event["id"], "closed")
 
-            # ИСПРАВЛЕНИЕ: notify передаётся извне
-            if notify:
-                try:
-                    await bot.send_message(
-                        chat_id,
-                        f"✅ <b>Пара {lesson_num} завершена.</b>\n"
-                        f"📚 {subject} — очередь закрыта.",
-                        parse_mode="HTML",
-                    )
-                except Exception as e:
-                    logger.error(f"Cannot notify group {chat_id}: {e}")
+    if closed_queue_ids and notify:
+        try:
+            await bot.send_message(
+                chat_id,
+                f"✅ <b>Пара {num_label} завершена.</b>\n"
+                f"📚 {subject} — очередь закрыта.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error(f"Cannot notify group {chat_id}: {e}")
 
 
 # ─────────────────────────────────────────────
