@@ -395,8 +395,12 @@ async def _build_sources_keyboard(chat_id: int, sources: list[dict]) -> InlineKe
     buttons += [
         [InlineKeyboardButton(text="➕ Добавить Telegram-канал", callback_data=f"sched_add_source:{chat_id}:telegram")],
         [InlineKeyboardButton(text="➕ Добавить ВКонтакте группу", callback_data=f"sched_add_source:{chat_id}:vk")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="sched_back_main")],
     ]
+    if sources:
+        buttons.append([InlineKeyboardButton(
+            text="🔄 Проверить сейчас", callback_data=f"sched_rescan_sources:{chat_id}",
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="sched_back_main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -433,6 +437,50 @@ async def cb_sources(call: CallbackQuery):
 
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await call.answer()
+
+
+@sched_router.callback_query(F.data.startswith("sched_rescan_sources:"))
+async def cb_rescan_sources(call: CallbackQuery):
+    """
+    Ручной форс-опрос источников чата без ожидания SOURCE_MONITOR_INTERVAL_MIN.
+    Не сбрасывает checkpoint — повторно обрабатываются только посты НОВЕЕ
+    последнего сохранённого last_post_id (как в обычном цикле мониторинга).
+    """
+    chat_id = int(call.data.split(":")[1])
+
+    if not await _is_admin(call.bot, chat_id, call.from_user.id):
+        await call.answer("❌ Только администраторы.", show_alert=True)
+        return
+
+    sources = await sdb.get_chat_sources(chat_id)
+    if not sources:
+        await call.answer("Источники не добавлены.", show_alert=True)
+        return
+
+    await call.answer("🔄 Проверяю источники...")
+
+    from source_monitor import check_telegram_source, check_vk_source
+
+    checked = 0
+    for source in sources:
+        stype = source.get("source_type", "")
+        try:
+            if stype == "telegram":
+                new_id = await check_telegram_source(call.bot, source, chat_id)
+            elif stype == "vk":
+                new_id = await check_vk_source(call.bot, source, chat_id)
+            else:
+                continue
+            checked += 1
+            if new_id:
+                await sdb.update_source_checkpoint(source["id"], new_id)
+        except Exception as e:
+            logger.error(f"Manual rescan error for source {source.get('id')}: {e}")
+
+    await call.message.answer(
+        f"✅ Проверено источников: {checked}.\n"
+        f"Если были новые посты с изменениями — они уже применены."
+    )
 
 @sched_router.callback_query(F.data.startswith("sched_add_source:"))
 async def cb_add_source(call: CallbackQuery, state: FSMContext):

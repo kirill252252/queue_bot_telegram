@@ -23,6 +23,7 @@
     группы с тем же lesson_num блокировало создание очереди для первой пары.
     Фильтр по group_id добавлен прямо в _open_lesson_queue.
 """
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -30,6 +31,32 @@ import db
 import schedule_db as sdb
 
 logger = logging.getLogger(__name__)
+
+# Фоновая задача мониторинга источников (TG/VK) — храним ссылку, чтобы не
+# создать дубль при повторном вызове start_background_jobs.
+_source_monitor_task: asyncio.Task | None = None
+
+
+def start_background_jobs(bot):
+    """
+    Запускает все фоновые циклы бота: тик расписания (очереди) и мониторинг
+    источников изменений (Telegram/VK).
+
+    БАГ: source_monitor_loop (парсинг изменений из ТГ/ВК-каналов) был написан,
+    но никогда не запускался — ни здесь, ни в main.py. Из-за этого источники
+    можно было добавить через /sched_add_source, но они никогда не опрашивались,
+    и изменения расписания из Telegram не подхватывались.
+    Вызови start_background_jobs(bot) один раз при старте бота (on_startup).
+    """
+    global _source_monitor_task
+
+    from source_monitor import source_monitor_loop
+
+    if _source_monitor_task is None or _source_monitor_task.done():
+        _source_monitor_task = asyncio.create_task(source_monitor_loop(bot))
+        logger.info("source_monitor_loop started")
+    else:
+        logger.debug("source_monitor_loop already running")
 
 
 def _now() -> datetime:
