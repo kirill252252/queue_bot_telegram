@@ -20,6 +20,7 @@ from keyboards import (
     freeze_keyboard, swap_select_keyboard, swap_confirm_keyboard,
     admin_panel_keyboard, admin_queue_list_keyboard, admin_queue_actions_keyboard,
     admin_queue_settings_keyboard, admin_kick_keyboard, admin_chat_select_keyboard,
+    move_select_keyboard,
 )
 from helpers import format_queue_info, format_queue_list, format_pm_my_queues
 from notifications import (
@@ -131,6 +132,9 @@ class AdmSetRemind(StatesGroup):
 
 class AdmAddMember(StatesGroup):
     waiting_for_user = State()
+
+class AdmMoveMember(StatesGroup):
+    waiting_for_position = State()
 
 # проверяем является ли юзер админом — Telegram-права, бот-права или владелец
 # TTL-кэш для is_admin: избегаем лишних вызовов Telegram API (44+ в хендлерах).
@@ -1961,7 +1965,9 @@ async def cb_adm_add_member(call: CallbackQuery, state: FSMContext):
         call.message,
         f"➕ <b>Добавить участника в «{queue['name']}»</b>\n\n"
         "Перешли любое сообщение от нужного пользователя\n"
-        "или напиши его @username:",
+        "или напиши его @username / user_id.\n\n"
+        "Чтобы вставить не в конец, а на конкретное место — "
+        "добавь номер места через пробел: <code>@username 3</code>",
         reply_markup=kb, parse_mode="HTML"
     )
     await call.answer()
@@ -1979,11 +1985,18 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
     target_id = None
     target_name = ""
     target_username = ""
+    target_position = None  # None => в конец
 
     def _cancel_kb():
         return InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm_queue:{queue_id}")
         ]])
+
+    raw_text = (message.text or "").strip()
+    # отделяем необязательный "@username 3" / "12345 3" — номер места последним токеном
+    parts = raw_text.rsplit(maxsplit=1) if raw_text else []
+    if len(parts) == 2 and parts[1].isdigit() and parts[0]:
+        raw_text, target_position = parts[0], int(parts[1])
 
     if message.forward_from:
         # Профиль открыт — forward_from содержит полные данные
@@ -2002,8 +2015,8 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
             reply_markup=_cancel_kb()
         )
         return
-    elif message.text and message.text.strip().startswith("@"):
-        username = message.text.strip().lstrip("@")
+    elif raw_text.startswith("@"):
+        username = raw_text.lstrip("@")
         try:
             chat = await message.bot.get_chat(f"@{username}")
             target_id = chat.id
@@ -2015,8 +2028,8 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
                 reply_markup=_cancel_kb()
             )
             return  # state НЕ сбрасываем — ждём следующей попытки
-    elif message.text and message.text.strip().lstrip("-").isdigit():
-        uid = int(message.text.strip())
+    elif raw_text.lstrip("-").isdigit():
+        uid = int(raw_text)
         try:
             chat = await message.bot.get_chat(uid)
             target_id = chat.id
@@ -2030,7 +2043,8 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
             return  # state НЕ сбрасываем — ждём следующей попытки
     else:
         await message.answer(
-            "❓ Перешли сообщение от пользователя или напиши @username / user_id.",
+            "❓ Перешли сообщение от пользователя или напиши @username / user_id "
+            "(при желании с номером места: <code>@username 3</code>).",
             reply_markup=_cancel_kb()
         )
         return  # state НЕ сбрасываем — ждём правильного ввода
@@ -2057,7 +2071,7 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
 
     await db.upsert_user(target_id, target_name, target_username)
     display = await db.resolve_display_name(target_id, queue["chat_id"], target_name)
-    pos = await db.join_queue(queue_id, target_id, display, target_username)
+    pos = await db.join_queue(queue_id, target_id, display, target_username, target_position)
 
     if pos == -1:
         await message.answer(f"{target_name} уже стоит в этой очереди.")
@@ -2073,6 +2087,91 @@ async def fsm_adm_add_member(message: Message, state: FSMContext):
         f"{display} добавлен на место #{pos} в {queue['name']}.",
         parse_mode="HTML"
     )
+    await _push_queue_update(message.bot, queue_id)
+
+
+# ─────────────────────────────── MOVE MEMBER ─────────────────────────────────
+
+@router.callback_query(F.data.startswith("adm_move_menu:"))
+async def cb_adm_move_menu(call: CallbackQuery):
+    queue_id = int(call.data.split(":")[1])
+    queue = await db.get_queue(queue_id)
+    if not queue or not await is_admin(call.bot, queue["chat_id"], call.from_user.id):
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    members = await db.get_queue_members(queue_id)
+    if not members:
+        await call.answer("Очередь пуста.", show_alert=True)
+        return
+    await safe_edit_text(
+        call.message, "🔀 Кого переставить?",
+        reply_markup=move_select_keyboard(queue_id, members, f"adm_queue:{queue_id}")
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adm_move_pick:"))
+async def cb_adm_move_pick(call: CallbackQuery, state: FSMContext):
+    _, qid_s, uid_s = call.data.split(":")
+    queue_id, user_id = int(qid_s), int(uid_s)
+    queue = await db.get_queue(queue_id)
+    if not queue or not await is_admin(call.bot, queue["chat_id"], call.from_user.id):
+        await call.answer("Нет прав.", show_alert=True)
+        return
+    member = await db.get_member(queue_id, user_id)
+    if not member:
+        await call.answer("Участник не найден.", show_alert=True)
+        return
+    count = await db.get_member_count(queue_id)
+    await state.update_data(queue_id=queue_id, user_id=user_id)
+    await state.set_state(AdmMoveMember.waiting_for_position)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm_queue:{queue_id}")
+    ]])
+    await safe_edit_text(
+        call.message,
+        f"🔀 <b>{member['display_name']}</b>, сейчас #{member['position']}.\n\n"
+        f"Введи новое место (1–{count}):",
+        reply_markup=kb, parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.message(AdmMoveMember.waiting_for_position)
+async def fsm_adm_move_position(message: Message, state: FSMContext):
+    data = await state.get_data()
+    queue_id, user_id = data["queue_id"], data["user_id"]
+    queue = await db.get_queue(queue_id)
+    if not queue:
+        await state.clear()
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"adm_queue:{queue_id}")
+    ]])
+    text = (message.text or "").strip()
+    if not text.isdigit() or int(text) < 1:
+        await message.answer("❓ Нужно целое число ≥ 1. Попробуй снова:", reply_markup=kb)
+        return  # state не сбрасываем — ждём корректный ввод
+
+    new_pos = int(text)
+    old_pos = await db.move_member(queue_id, user_id, new_pos)
+    await state.clear()
+
+    if old_pos is None:
+        await message.answer("Участник уже вышел из очереди.")
+        return
+
+    member = await db.get_member(queue_id, user_id)
+    final_pos = member["position"] if member else new_pos
+    await message.answer(
+        f"✅ {member['display_name']} перемещён: #{old_pos} → #{final_pos}.",
+        parse_mode="HTML"
+    )
+
+    members = await db.get_queue_members(queue_id)
+    if old_pos == 1 or final_pos == 1:
+        await notify_became_first(message.bot, queue, members[0], queue["chat_id"])
     await _push_queue_update(message.bot, queue_id)
 
 

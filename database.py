@@ -355,21 +355,73 @@ async def get_member(queue_id: int, user_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
-async def join_queue(queue_id: int, user_id: int, display_name: str, username: str) -> int:
+async def join_queue(queue_id: int, user_id: int, display_name: str, username: str,
+                     position: int | None = None) -> int:
+    """Ставит участника в очередь. Если position не указан — в конец.
+    Если указан — вставляет на это место, сдвигая остальных вниз."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT MAX(position) FROM queue_members WHERE queue_id = ?", (queue_id,))
         row = await cur.fetchone()
-        next_pos = (row[0] or 0) + 1
+        last_pos = row[0] or 0
+        target_pos = position if position and position >= 1 else last_pos + 1
+        target_pos = min(target_pos, last_pos + 1)
+
         try:
+            if target_pos <= last_pos:
+                await db.execute(
+                    "UPDATE queue_members SET position = position + 1 "
+                    "WHERE queue_id = ? AND position >= ?",
+                    (queue_id, target_pos))
             await db.execute("""
                 INSERT INTO queue_members (queue_id, user_id, display_name, username, position)
                 VALUES (?, ?, ?, ?, ?)
-            """, (queue_id, user_id, display_name, username, next_pos))
+            """, (queue_id, user_id, display_name, username, target_pos))
             await db.commit()
-            return next_pos
+            return target_pos
         except aiosqlite.IntegrityError:
             return -1
+
+
+async def move_member(queue_id: int, user_id: int, new_position: int) -> Optional[int]:
+    """Переставляет существующего участника на new_position, сдвигая остальных.
+    Возвращает старую позицию или None если участник не найден."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT position FROM queue_members WHERE queue_id = ? AND user_id = ?",
+            (queue_id, user_id))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        old_pos = row[0]
+
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM queue_members WHERE queue_id = ?", (queue_id,))
+        count = (await cur.fetchone())[0]
+        new_pos = max(1, min(new_position, count))
+        if new_pos == old_pos:
+            return old_pos
+
+        await db.execute(
+            "UPDATE queue_members SET position = -1 WHERE queue_id = ? AND user_id = ?",
+            (queue_id, user_id))
+
+        if new_pos < old_pos:
+            await db.execute(
+                "UPDATE queue_members SET position = position + 1 "
+                "WHERE queue_id = ? AND position >= ? AND position < ?",
+                (queue_id, new_pos, old_pos))
+        else:
+            await db.execute(
+                "UPDATE queue_members SET position = position - 1 "
+                "WHERE queue_id = ? AND position > ? AND position <= ?",
+                (queue_id, old_pos, new_pos))
+
+        await db.execute(
+            "UPDATE queue_members SET position = ? WHERE queue_id = ? AND user_id = ?",
+            (new_pos, queue_id, user_id))
+        await db.commit()
+        return old_pos
 
 
 # выходим из очереди и сдвигаем всех за нами

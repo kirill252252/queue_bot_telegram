@@ -298,20 +298,74 @@ async def get_member(queue_id: int, user_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
-async def join_queue(queue_id: int, user_id: int, display_name: str, username: str) -> int:
+async def join_queue(queue_id: int, user_id: int, display_name: str, username: str,
+                     position: int | None = None) -> int:
+    """Ставит участника в очередь. Если position не указан — в конец.
+    Если указан — вставляет на это место, сдвигая остальных вниз."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT MAX(position) FROM queue_members WHERE queue_id=$1", queue_id)
-        next_pos = (row['max'] or 0) + 1
-        try:
-            await conn.execute("""
-                INSERT INTO queue_members (queue_id, user_id, display_name, username, position)
-                VALUES ($1,$2,$3,$4,$5)
-            """, queue_id, user_id, display_name, username, next_pos)
-            return next_pos
-        except asyncpg.UniqueViolationError:
-            return -1
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT MAX(position) FROM queue_members WHERE queue_id=$1", queue_id)
+            last_pos = row['max'] or 0
+            target_pos = position if position and position >= 1 else last_pos + 1
+            target_pos = min(target_pos, last_pos + 1)  # нельзя оставить дыру дальше конца
+
+            try:
+                if target_pos <= last_pos:
+                    # освобождаем место сдвигом вниз всех начиная с target_pos
+                    await conn.execute(
+                        "UPDATE queue_members SET position=position+1 "
+                        "WHERE queue_id=$1 AND position>=$2",
+                        queue_id, target_pos)
+                await conn.execute("""
+                    INSERT INTO queue_members (queue_id, user_id, display_name, username, position)
+                    VALUES ($1,$2,$3,$4,$5)
+                """, queue_id, user_id, display_name, username, target_pos)
+                return target_pos
+            except asyncpg.UniqueViolationError:
+                return -1
+
+
+async def move_member(queue_id: int, user_id: int, new_position: int) -> Optional[int]:
+    """Переставляет существующего участника на new_position, сдвигая остальных.
+    Возвращает старую позицию или None если участник не найден."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT position FROM queue_members WHERE queue_id=$1 AND user_id=$2",
+                queue_id, user_id)
+            if not row:
+                return None
+            old_pos = row['position']
+
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM queue_members WHERE queue_id=$1", queue_id)
+            new_pos = max(1, min(new_position, count))
+            if new_pos == old_pos:
+                return old_pos
+
+            # временно убираем за пределы позиций на случай UNIQUE(queue_id, position)
+            await conn.execute(
+                "UPDATE queue_members SET position=-1 WHERE queue_id=$1 AND user_id=$2",
+                queue_id, user_id)
+
+            if new_pos < old_pos:
+                await conn.execute(
+                    "UPDATE queue_members SET position=position+1 "
+                    "WHERE queue_id=$1 AND position>=$2 AND position<$3",
+                    queue_id, new_pos, old_pos)
+            else:
+                await conn.execute(
+                    "UPDATE queue_members SET position=position-1 "
+                    "WHERE queue_id=$1 AND position>$2 AND position<=$3",
+                    queue_id, old_pos, new_pos)
+
+            await conn.execute(
+                "UPDATE queue_members SET position=$1 WHERE queue_id=$2 AND user_id=$3",
+                new_pos, queue_id, user_id)
+            return old_pos
 
 
 async def leave_queue(queue_id: int, user_id: int) -> bool:

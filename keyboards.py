@@ -168,6 +168,15 @@ def kick_members_keyboard(queue_id: int, members: list[dict]) -> InlineKeyboardM
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"view_queue:{queue_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# список участников для перестановки места админом
+def move_select_keyboard(queue_id: int, members: list[dict], back_cb: str) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(
+        text=f"#{m['position']} {m['display_name']}",
+        callback_data=f"adm_move_pick:{queue_id}:{m['user_id']}"
+    )] for m in members]
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data=back_cb)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 def confirm_keyboard(action: str, entity_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Да",  callback_data=f"confirm_{action}:{entity_id}"),
@@ -275,6 +284,8 @@ def admin_queue_actions_keyboard(queue_id: int, chat_id: int,
             InlineKeyboardButton(text="➕ Добавить участника",
                                  callback_data=f"adm_add_member:{queue_id}"),
         ])
+        buttons.append([InlineKeyboardButton(text="🔀 Переместить участника",
+                                              callback_data=f"adm_move_menu:{queue_id}")])
         buttons.append([InlineKeyboardButton(text="🔗 Ссылка-приглашение",
                                               callback_data=f"adm_invite:{queue_id}")])
     buttons.append([
