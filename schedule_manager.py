@@ -469,11 +469,59 @@ async def get_today_schedule(group_id: int) -> list[dict]:
     return [l for l in effective if int(l.get("week_type") or 0) in (0, current)]
 
 
-async def get_week_schedule(group_id: int) -> dict[int, list[dict]]:
-    """Базовое расписание на всю неделю без фильтрации по неделям."""
-    result = {}
-    for wd in range(1, 8):
-        lessons = await sdb.get_lessons_for_day(group_id, wd)
-        if lessons:
-            result[wd] = lessons
+async def get_tomorrow_schedule(group_id: int, chat_id: int) -> list[dict]:
+    """
+    Расписание на завтра с учётом таймзоны чата, переопределений (overrides)
+    и типа недели на дату завтра (а не на сегодня — важно у границы недель).
+    """
+    now      = await _now_for_chat(chat_id)
+    tomorrow = now.date() + timedelta(days=1)
+    weekday  = tomorrow.isoweekday()
+    date_str = tomorrow.strftime("%Y-%m-%d")
+
+    lessons   = await sdb.get_lessons_for_day(group_id, weekday)
+    overrides = await sdb.get_overrides_for_date(group_id, date_str)
+    effective = get_effective_lessons(lessons, overrides, date_str)
+
+    week_type = sdb.get_week_type_for_date(tomorrow)
+    return [l for l in effective if int(l.get("week_type") or 0) in (0, week_type)]
+
+
+async def get_week_schedule(group_id: int, chat_id: int | None = None) -> dict[int, list[dict]]:
+    """
+    Расписание на ближайшие 7 дней (начиная с сегодня), С УЧЁТОМ переопределений
+    (overrides) на каждую конкретную дату — изменения из листа «Изменения в
+    расписании» (cancel/reschedule/room_change/...) теперь видны и в недельном
+    расписании, а не только в /sched_today.
+
+    Если chat_id не передан — работает по старому (без per-chat таймзоны и без
+    overrides), для обратной совместимости.
+    """
+    if chat_id is None:
+        result = {}
+        for wd in range(1, 8):
+            lessons = await sdb.get_lessons_for_day(group_id, wd)
+            if lessons:
+                result[wd] = lessons
+        return result
+
+    now = await _now_for_chat(chat_id)
+    result: dict[int, list[dict]] = {}
+
+    for offset in range(7):
+        day      = now.date() + timedelta(days=offset)
+        weekday  = day.isoweekday()
+        date_str = day.strftime("%Y-%m-%d")
+
+        lessons = await sdb.get_lessons_for_day(group_id, weekday)
+        if not lessons:
+            continue
+
+        overrides = await sdb.get_overrides_for_date(group_id, date_str)
+        effective = get_effective_lessons(lessons, overrides, date_str) if overrides else lessons
+
+        # week_type фильтруется при отображении (handlers группируют по дробям),
+        # поэтому здесь оставляем все варианты — как и раньше.
+        result[weekday] = effective
+
     return result

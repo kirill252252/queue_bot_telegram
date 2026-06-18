@@ -3,10 +3,14 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 def schedule_main_keyboard(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📸 Загрузить расписание", callback_data="sched_upload_new")],
+        [
+            InlineKeyboardButton(text="📸 Загрузить расписание", callback_data="sched_upload_new"),
+            InlineKeyboardButton(text="📋 Загрузить изменения",  callback_data="sched_upload_changes"),
+        ],
         [
             InlineKeyboardButton(text="📋 Вся неделя", callback_data="sched_show"),
             InlineKeyboardButton(text="📅 Сегодня",    callback_data="sched_today"),
+            InlineKeyboardButton(text="📆 Завтра",     callback_data="sched_tomorrow"),
         ],
         [
             InlineKeyboardButton(text="1️⃣ Нечётная",   callback_data="sched_show_odd"),

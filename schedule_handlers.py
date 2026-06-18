@@ -32,10 +32,11 @@ from schedule_group_match import build_group_lookup, resolve_target_groups
 from schedule_ocr import (
     parse_schedule_image,
     parse_schedule_change,
+    parse_change_image,
     format_schedule,
     split_by_week,
 )
-from schedule_manager import get_today_schedule, get_week_schedule
+from schedule_manager import get_today_schedule, get_tomorrow_schedule, get_week_schedule
 from schedule_ui import schedule_main_keyboard
 
 sched_router = Router()
@@ -62,8 +63,9 @@ WEEK_TYPE_ICONS  = {0: "📆", 1: "1️⃣", 2: "2️⃣"}
 
 class ScheduleStates(StatesGroup):
     # Загрузка расписания
-    waiting_photo       = State()  # ждём фото расписания
-    waiting_source      = State()  # ждём @username для источника мониторинга
+    waiting_photo          = State()  # ждём фото расписания
+    waiting_changes_photo  = State()  # ждём фото листа «Изменения в расписании»
+    waiting_source         = State()  # ждём @username для источника мониторинга
 
     # Редактирование поля занятия (предмет / препод / аудитория / время)
     edit_lesson_field   = State()  # ждём новое значение поля
@@ -280,6 +282,120 @@ async def fsm_no_photo(message: Message):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# ЗАГРУЗКА ЛИСТА «ИЗМЕНЕНИЯ В РАСПИСАНИИ» — фото → OCR → save_override
+# Применяется только к группам, уже привязанным к этому чату (как и при
+# автораспознавании из source_monitor / on_group_photo).
+# ═══════════════════════════════════════════════════════════════════
+
+@sched_router.callback_query(F.data == "sched_upload_changes")
+async def cb_upload_changes(call: CallbackQuery, state: FSMContext):
+    """Кнопка «📋 Загрузить изменения» — переводим в режим ожидания фото листа изменений."""
+    if not await _is_admin(call.bot, call.message.chat.id, call.from_user.id):
+        await call.answer("❌ Только администраторы могут загружать изменения.", show_alert=True)
+        return
+
+    groups = await sdb.get_chat_groups(call.message.chat.id)
+    if not groups:
+        await call.answer("Сначала загрузите базовое расписание («📸 Загрузить расписание»).", show_alert=True)
+        return
+
+    await state.update_data(chat_id=call.message.chat.id)
+    await state.set_state(ScheduleStates.waiting_changes_photo)
+
+    await call.message.answer(
+        "📋 <b>Отправьте фото листа «Изменения в расписании».</b>\n\n"
+        "Бот распознает дату и применит изменения (отмены, переносы, замены) "
+        "к группам, привязанным к этому чату: "
+        + ", ".join(g["group_name"] for g in groups) + ".\n\n"
+        "Чтобы отменить — отправьте /schedule",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@sched_router.message(ScheduleStates.waiting_changes_photo, F.photo)
+async def fsm_receive_changes_photo(message: Message, state: FSMContext):
+    """Получаем фото листа изменений, парсим через Groq AI и применяем save_override."""
+    data = await state.get_data()
+    chat_id = data.get("chat_id", message.chat.id)
+    await state.clear()
+
+    status_msg = await message.answer("⏳ Распознаю изменения, подождите...")
+
+    try:
+        image_bytes = await _download_photo(message)
+    except Exception as e:
+        logger.error(f"Changes photo download error: {e}")
+        await status_msg.edit_text("❌ Не удалось скачать фото. Попробуйте ещё раз.")
+        return
+
+    result = await parse_change_image(image_bytes)
+    if not result:
+        await status_msg.edit_text(
+            "❌ <b>Не удалось распознать лист изменений.</b>\n\n"
+            "Убедитесь, что весь текст таблицы виден и не размыт.",
+            parse_mode="HTML",
+        )
+        return
+
+    changes = result.get("changes") or []
+    fallback_date = result.get("date")
+
+    if not changes:
+        await status_msg.edit_text(
+            "ℹ️ Изменений не найдено — все группы «по расписанию», или лист не распознан.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Применяем изменения только к группам этого чата (как в source_monitor/on_group_photo)
+    groups = await sdb.get_chat_groups(chat_id)
+    group_lookup = build_group_lookup(groups)
+
+    applied = []
+    skipped_unknown = set()
+    for change in changes:
+        targets = resolve_target_groups(change, groups, group_lookup)
+        if not targets:
+            if change.get("group"):
+                skipped_unknown.add(change["group"])
+            continue
+
+        for group in targets:
+            await sdb.save_override(group["id"], change, fallback_date=fallback_date)
+
+        action = change.get("action") or "change"
+        subject = change.get("subject") or "—"
+        for group in targets:
+            applied.append(f"<b>{group['group_name']}</b>, пара {change.get('lesson_num', '?')}: {action} — {subject}")
+
+    lines = []
+    if fallback_date:
+        lines.append(f"📅 Дата изменений: <b>{fallback_date}</b>\n")
+    if applied:
+        lines.append(f"✅ <b>Применено изменений: {len(applied)}</b>")
+        lines.extend(f"• {a}" for a in applied)
+    else:
+        lines.append("ℹ️ В таблице не найдено изменений для групп этого чата.")
+
+    if skipped_unknown:
+        lines.append(
+            "\n⚠️ Пропущены строки для групп, не привязанных к этому чату: "
+            + ", ".join(sorted(skipped_unknown))
+        )
+
+    await status_msg.edit_text("\n".join(lines), parse_mode="HTML")
+
+
+@sched_router.message(ScheduleStates.waiting_changes_photo)
+async def fsm_no_changes_photo(message: Message):
+    """Пользователь в режиме ожидания фото изменений прислал что-то другое."""
+    if message.text and message.text.startswith("/"):
+        return
+    await message.answer("Пожалуйста, отправьте <b>фотографию</b> листа изменений.", parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # ПОКАЗ РАСПИСАНИЯ
 # ═══════════════════════════════════════════════════════════════════
 
@@ -376,6 +492,42 @@ async def cb_show_today(call: CallbackQuery):
         parts.append("\n".join(lines))
 
     await call.message.answer("\n\n".join(parts) if parts else "Сегодня пар нет 🎉", parse_mode="HTML")
+    await call.answer()
+
+
+@sched_router.callback_query(F.data == "sched_tomorrow")
+async def cb_show_tomorrow(call: CallbackQuery):
+    """Кнопка «📆 Завтра» — расписание на завтра с учётом переопределений."""
+    chat_id = call.message.chat.id
+    groups  = await sdb.get_chat_groups(chat_id)
+
+    if not groups:
+        await call.answer("Расписание не загружено.", show_alert=True)
+        return
+
+    tomorrow_dt = (await sdb.get_local_now_for_chat(chat_id)).date() + timedelta(days=1)
+    wd          = tomorrow_dt.isoweekday()
+    day_name    = DAYS_FULL.get(wd, str(wd))
+    bells_cache = {b["lesson_num"]: b for b in await sdb.get_bells(chat_id)}
+
+    parts = []
+    for group in groups:
+        lessons = await get_tomorrow_schedule(group["id"], chat_id)  # учитывает overrides на дату завтра
+
+        if not lessons:
+            parts.append(f"😴 <b>{group['group_name']}</b> — {day_name}: пар нет")
+            continue
+
+        lines = [f"📆 <b>{group['group_name']} — {day_name}</b>\n"]
+        for l in lessons:
+            teacher = f" — {l.get('teacher')}" if l.get("teacher") else ""
+            room    = f" [{l.get('room')}]" if l.get("room") else ""
+            time_s  = _lesson_time_str(l, bells_cache)
+            week_s  = _lesson_week_icon(l)
+            lines.append(f"{l['lesson_num']}.{time_s}{week_s} <b>{l['subject']}</b>{teacher}{room}")
+        parts.append("\n".join(lines))
+
+    await call.message.answer("\n\n".join(parts) if parts else "Завтра пар нет 🎉", parse_mode="HTML")
     await call.answer()
 
 
@@ -1632,7 +1784,7 @@ async def _show_filtered_week(call: CallbackQuery, week_type: int):
 
     parts: list[str] = []
     for group in groups:
-        week = await get_week_schedule(group["id"])
+        week = await get_week_schedule(group["id"], chat_id)
         if not week:
             continue
 
