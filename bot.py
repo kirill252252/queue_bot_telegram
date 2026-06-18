@@ -5,7 +5,6 @@ import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Update
 
 from config import (
     BOT_TOKEN,
@@ -27,6 +26,8 @@ from schedule_handlers import sched_router
 from schedule_manager import process_schedule_tick
 from source_monitor import close_session as close_source_monitor_session
 from source_monitor import source_monitor_loop
+
+from consent_reply import init_consent_reply_db, consent_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +64,7 @@ async def start_web_panel():
         )
 
         server = uvicorn.Server(config)
+
         async def _serve():
             with suppress(Exception):
                 await server.serve()
@@ -80,10 +82,14 @@ async def main():
         logger.error("BOT_TOKEN not set")
         sys.exit(1)
 
-    logger.info("Using %s database", "PostgreSQL" if DB_TYPE == "postgres" else "SQLite")
+    logger.info(
+        "Using %s database",
+        "PostgreSQL" if DB_TYPE == "postgres" else "SQLite"
+    )
 
     await db.init_db()
     await sdb.init_schedule_db()
+    await init_consent_reply_db()
 
     logger.info(f"Bot started (mode={BOT_MODE}, db={DB_TYPE})")
 
@@ -93,11 +99,18 @@ async def main():
 
     dp.include_router(router)
     dp.include_router(sched_router)
+    dp.include_router(consent_router)  
 
     tasks = [
-        asyncio.create_task(background_loop(bot), name="background_loop"),
         asyncio.create_task(
-            source_monitor_loop(bot, interval_minutes=SOURCE_MONITOR_INTERVAL_MIN),
+            background_loop(bot),
+            name="background_loop",
+        ),
+        asyncio.create_task(
+            source_monitor_loop(
+                bot,
+                interval_minutes=SOURCE_MONITOR_INTERVAL_MIN,
+            ),
             name="source_monitor_loop",
         ),
     ]
@@ -106,7 +119,10 @@ async def main():
         await start_web_panel()
 
         if BOT_MODE == "webhook" and WEBHOOK_HOST:
-            from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+            from aiogram.webhook.aiohttp_server import (
+                SimpleRequestHandler,
+                setup_application,
+            )
             from aiohttp import web
 
             webhook_url = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
@@ -116,36 +132,53 @@ async def main():
 
             app = web.Application()
 
-            SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+            SimpleRequestHandler(
+                dispatcher=dp,
+                bot=bot,
+            ).register(app, path=WEBHOOK_PATH)
+
             setup_application(app, dp, bot=bot)
 
             runner = web.AppRunner(app)
             await runner.setup()
 
-            site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
+            site = web.TCPSite(
+                runner,
+                "0.0.0.0",
+                WEBHOOK_PORT,
+            )
             await site.start()
 
             logger.info(f"Webhook server on :{WEBHOOK_PORT}")
+
             await asyncio.Event().wait()
+
         else:
-            await bot.delete_webhook(drop_pending_updates=True)
+            await bot.delete_webhook(
+                drop_pending_updates=True
+            )
+
             await dp.start_polling(
                 bot,
                 allowed_updates=[
                     "message",
                     "callback_query",
-                    "my_chat_member",
+
+"my_chat_member",
                 ],
             )
+
     finally:
         for task in tasks:
             task.cancel()
+
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
+
         await close_source_monitor_session()
         await bot.session.close()
 
 
-if __name__ == "__main__":
+if name == "__main__":
     asyncio.run(main())
