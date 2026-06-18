@@ -99,7 +99,7 @@ async def main():
 
     dp.include_router(router)
     dp.include_router(sched_router)
-    dp.include_router(consent_router)  
+    dp.include_router(consent_router)
 
     tasks = [
         asyncio.create_task(
@@ -163,8 +163,7 @@ async def main():
                 allowed_updates=[
                     "message",
                     "callback_query",
-
-"my_chat_member",
+                    "my_chat_member",
                 ],
             )
 
@@ -180,5 +179,5 @@ async def main():
         await bot.session.close()
 
 
-if name == "__main__":
+if __name__ == "__main__":
     asyncio.run(main())
