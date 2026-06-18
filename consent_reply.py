@@ -1,11 +1,14 @@
 """
-consent_reply.py — авто-реплай в группе фиксированным текстом, но ТОЛЬКО
-после явного согласия самого пользователя.
+consent_reply.py — авто-реплай в группе фиксированным текстом или картинкой,
+но ТОЛЬКО после явного согласия самого пользователя.
 
 Поток:
   1. Владелец бота пишет боту в ЛС: /setreply <user_id> <текст>
-  2. Бот сразу шлёт этот ТОЧНЫЙ текст самому user_id в личные сообщения
-     с вопросом-подтверждением и кнопками «✅ Согласен» / «❌ Отказаться».
+     либо присылает ФОТО с подписью /setreply <user_id> [подпись] —
+     тогда реплай будет картинкой (Telegram передаёт команды и в caption).
+  2. Бот сразу шлёт этот ТОЧНЫЙ текст или ТОЧНО ЭТУ картинку самому user_id
+     в личные сообщения, затем — вопрос-подтверждение с кнопками
+     «✅ Согласен» / «❌ Отказаться».
      Человек видит, что именно будет приходить, ДО включения.
   3. Если человек нажимает «✅ Согласен» — режим включается: в любой группе,
      где есть и бот, и этот человек, бот отвечает (reply) этим текстом на
@@ -78,14 +81,27 @@ async def _init_sqlite():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS consent_replies (
-                user_id     INTEGER PRIMARY KEY,
-                reply_text  TEXT NOT NULL,
-                status      TEXT NOT NULL DEFAULT 'pending',
-                set_by      INTEGER,
-                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                decided_at  TIMESTAMP
+                user_id        INTEGER PRIMARY KEY,
+                reply_text     TEXT NOT NULL DEFAULT '',
+                reply_type     TEXT NOT NULL DEFAULT 'text',
+                reply_file_id  TEXT,
+                status         TEXT NOT NULL DEFAULT 'pending',
+                set_by         INTEGER,
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                decided_at     TIMESTAMP
             )
         """)
+
+        # миграция для таблиц, созданных до появления типа реплая (фото)
+        cur = await db.execute("PRAGMA table_info(consent_replies)")
+        existing_cols = {row[1] for row in await cur.fetchall()}
+        if "reply_type" not in existing_cols:
+            await db.execute(
+                "ALTER TABLE consent_replies ADD COLUMN reply_type TEXT NOT NULL DEFAULT 'text'"
+            )
+        if "reply_file_id" not in existing_cols:
+            await db.execute("ALTER TABLE consent_replies ADD COLUMN reply_file_id TEXT")
+
         await db.commit()
 
 
@@ -95,32 +111,50 @@ async def _init_pg():
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS consent_replies (
-                user_id     BIGINT PRIMARY KEY,
-                reply_text  TEXT NOT NULL,
-                status      TEXT NOT NULL DEFAULT 'pending',
-                set_by      BIGINT,
-                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                decided_at  TIMESTAMP
+                user_id        BIGINT PRIMARY KEY,
+                reply_text     TEXT NOT NULL DEFAULT '',
+                reply_type     TEXT NOT NULL DEFAULT 'text',
+                reply_file_id  TEXT,
+                status         TEXT NOT NULL DEFAULT 'pending',
+                set_by         BIGINT,
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                decided_at     TIMESTAMP
             )
         """)
+        # миграция для таблиц, созданных до появления типа реплая (фото)
+        await conn.execute(
+            "ALTER TABLE consent_replies ADD COLUMN IF NOT EXISTS reply_type TEXT NOT NULL DEFAULT 'text'"
+        )
+        await conn.execute(
+            "ALTER TABLE consent_replies ADD COLUMN IF NOT EXISTS reply_file_id TEXT"
+        )
 
 
-async def upsert_pending(user_id: int, reply_text: str, set_by: int) -> None:
+async def upsert_pending(
+    user_id: int,
+    reply_text: str,
+    set_by: int,
+    reply_type: str = "text",
+    file_id: str | None = None,
+) -> None:
     if _get_db_type() == "postgres":
         from database_pg import get_pool
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO consent_replies (user_id, reply_text, status, set_by, decided_at)
-                VALUES ($1, $2, 'pending', $3, NULL)
+                INSERT INTO consent_replies
+                    (user_id, reply_text, reply_type, reply_file_id, status, set_by, decided_at)
+                VALUES ($1, $2, $3, $4, 'pending', $5, NULL)
                 ON CONFLICT (user_id) DO UPDATE
                     SET reply_text = EXCLUDED.reply_text,
+                        reply_type = EXCLUDED.reply_type,
+                        reply_file_id = EXCLUDED.reply_file_id,
                         status = 'pending',
                         set_by = EXCLUDED.set_by,
                         decided_at = NULL
                 """,
-                user_id, reply_text, set_by,
+                user_id, reply_text, reply_type, file_id, set_by,
             )
         return
 
@@ -129,15 +163,18 @@ async def upsert_pending(user_id: int, reply_text: str, set_by: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT INTO consent_replies (user_id, reply_text, status, set_by, decided_at)
-            VALUES (?, ?, 'pending', ?, NULL)
+            INSERT INTO consent_replies
+                (user_id, reply_text, reply_type, reply_file_id, status, set_by, decided_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, NULL)
             ON CONFLICT(user_id) DO UPDATE SET
                 reply_text = excluded.reply_text,
+                reply_type = excluded.reply_type,
+                reply_file_id = excluded.reply_file_id,
                 status = 'pending',
                 set_by = excluded.set_by,
                 decided_at = NULL
             """,
-            (user_id, reply_text, set_by),
+            (user_id, reply_text, reply_type, file_id, set_by),
         )
         await db.commit()
 
@@ -225,35 +262,74 @@ async def delete_entry(user_id: int) -> None:
 @consent_router.message(Command("setreply"), F.chat.type == "private")
 async def cmd_setreply(message: Message):
     """
-    /setreply <user_id> <текст>
-    Отправляет ТОЧНО ЭТОТ текст пользователю в ЛС с запросом согласия.
+    /setreply <user_id> <текст>           — текстовый реплай
+    Фото с подписью /setreply <user_id> [подпись] — реплай картинкой
+
+    Отправляет ТОЧНО ЭТОТ контент пользователю в ЛС с запросом согласия.
     Реплай в группе включится только если пользователь подтвердит.
     """
     if not _is_owner(message.from_user.id):
         await message.reply("❌ Команда доступна только владельцу бота.")
         return
 
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) < 3 or not parts[1].lstrip("-").isdigit():
+    raw = message.text or message.caption or ""
+    parts = raw.split(maxsplit=2)
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
         await message.reply(
             "Использование: <code>/setreply USER_ID текст</code>\n"
-            "Например: <code>/setreply 123456789 Привет! Как дела?</code>",
+            "Например: <code>/setreply 123456789 Привет! Как дела?</code>\n\n"
+            "Чтобы реплай был картинкой — пришлите фото с такой же подписью "
+            "(<code>/setreply USER_ID [подпись]</code>).",
             parse_mode="HTML",
         )
         return
 
     target_id = int(parts[1])
-    reply_text = parts[2].strip()
-    if not reply_text:
-        await message.reply("Текст не может быть пустым.")
-        return
-
-    await upsert_pending(target_id, reply_text, set_by=message.from_user.id)
+    reply_text = parts[2].strip() if len(parts) > 2 else ""
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Согласен", callback_data=f"consent_yes:{target_id}"),
         InlineKeyboardButton(text="❌ Отказаться", callback_data=f"consent_no:{target_id}"),
     ]])
+
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        await upsert_pending(
+            target_id, reply_text, set_by=message.from_user.id,
+            reply_type="photo", file_id=file_id,
+        )
+
+        try:
+            # сначала показываем ТОЧНО ту же картинку, что будет уходить в группе
+            await message.bot.send_photo(target_id, file_id, caption=reply_text or None)
+            await message.bot.send_message(
+                target_id,
+                "👋 Пользователь, управляющий ботом, предложил, чтобы в группах, "
+                "где вы оба состоите, бот отвечал вам показанным выше изображением "
+                "на каждое ваше сообщение.\n\n"
+                "Согласны ли вы получать именно это в ответ? "
+                "В любой момент вы можете отключить это командой /stopreply здесь, в ЛС боту.",
+                reply_markup=kb,
+            )
+        except Exception as e:
+            logger.error(f"Could not DM user {target_id}: {e}")
+            await message.reply(
+                "⚠️ Не удалось отправить запрос пользователю в ЛС.\n"
+                "Возможно, он не запускал бота (/start) — попросите его сначала написать боту."
+            )
+            return
+
+        await message.reply(
+            f"✅ Запрос на согласие (картинка) отправлен пользователю <code>{target_id}</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    if not reply_text:
+        await message.reply("Текст не может быть пустым.")
+        return
+
+    await upsert_pending(target_id, reply_text, set_by=message.from_user.id, reply_type="text")
 
     try:
         await message.bot.send_message(
@@ -293,7 +369,9 @@ async def cmd_replylist(message: Message):
     lines = ["<b>Статусы согласий:</b>"]
     for e in entries:
         icon = icons.get(e["status"], "❓")
-        lines.append(f"{icon} <code>{e['user_id']}</code> — {e['status']}: «{e['reply_text'][:50]}»")
+        kind = "📷" if e.get("reply_type") == "photo" else "💬"
+        preview = e["reply_text"][:50] if e["reply_text"] else "(без подписи)"
+        lines.append(f"{icon} {kind} <code>{e['user_id']}</code> — {e['status']}: «{preview}»")
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
@@ -391,4 +469,7 @@ async def on_consented_message(message: Message):
     if not entry or entry["status"] != "accepted":
         return
 
-    await message.reply(entry["reply_text"])
+    if entry.get("reply_type") == "photo" and entry.get("reply_file_id"):
+        await message.reply_photo(entry["reply_file_id"], caption=entry["reply_text"] or None)
+    else:
+        await message.reply(entry["reply_text"])
