@@ -196,6 +196,28 @@ async def list_entries() -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def delete_entry(user_id: int) -> None:
+    if _get_db_type() == "postgres":
+        from database_pg import get_pool
+        pool = await get_pool()
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM consent_replies WHERE user_id = $1",
+                user_id,
+            )
+        return
+
+    import aiosqlite
+    from database import DB_PATH
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM consent_replies WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.commit()
+
 # ═══════════════════════════════════════════════════════════════════
 # ВЛАДЕЛЕЦ: задать текст для пользователя (только в ЛС боту)
 # ═══════════════════════════════════════════════════════════════════
@@ -273,6 +295,45 @@ async def cmd_replylist(message: Message):
         icon = icons.get(e["status"], "❓")
         lines.append(f"{icon} <code>{e['user_id']}</code> — {e['status']}: «{e['reply_text'][:50]}»")
     await message.reply("\n".join(lines), parse_mode="HTML")
+
+    @consent_router.message(Command("delreply"), F.chat.type == "private")
+    async def cmd_delreply(message: Message):
+        """/delreply USER_ID Полностью удаляет подписку пользователя."""
+
+    if not _is_owner(message.from_user.id):
+        await message.reply("❌ Команда доступна только владельцу бота.")
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.reply(
+            "Использование:\n<code>/delreply USER_ID</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    user_id = int(parts[1])
+
+    entry = await get_entry(user_id)
+    if not entry:
+        await message.reply("Пользователь не найден.")
+        return
+
+    await delete_entry(user_id)
+
+    await message.reply(
+        f"🗑 Подписка пользователя <code>{user_id}</code> удалена.",
+        parse_mode="HTML",
+    )
+
+    try:
+        await message.bot.send_message(
+            user_id,
+            "🛑 Владелец бота отключил и удалил ваш авто-реплай."
+        )
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
