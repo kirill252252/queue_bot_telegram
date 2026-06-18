@@ -296,10 +296,10 @@ async def cmd_replylist(message: Message):
         lines.append(f"{icon} <code>{e['user_id']}</code> — {e['status']}: «{e['reply_text'][:50]}»")
     await message.reply("\n".join(lines), parse_mode="HTML")
 
-    @consent_router.message(Command("delreply"), F.chat.type == "private")
-    async def cmd_delreply(message: Message):
-        """/delreply USER_ID Полностью удаляет подписку пользователя."""
 
+@consent_router.message(Command("delreply"), F.chat.type == "private")
+async def cmd_delreply(message: Message):
+    """/delreply USER_ID Полностью удаляет подписку пользователя."""
     if not _is_owner(message.from_user.id):
         await message.reply("❌ Команда доступна только владельцу бота.")
         return
