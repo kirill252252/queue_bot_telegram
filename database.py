@@ -116,6 +116,7 @@ async def init_db():
             ("remind_timeout_min", "INTEGER DEFAULT 5"),
             ("notify_leave_public", "INTEGER DEFAULT 1"),
             ("auto_kick", "INTEGER DEFAULT 1"),
+            ("pinned_message_id", "INTEGER"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE queues ADD COLUMN {col} {defn}")
@@ -309,6 +310,13 @@ async def update_queue_settings(queue_id: int, remind_timeout_min: int,
 async def close_queue(queue_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE queues SET is_active = 0 WHERE id = ?", (queue_id,))
+        await db.commit()
+
+
+async def set_pinned_message(queue_id: int, message_id: Optional[int]):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE queues SET pinned_message_id = ? WHERE id = ?", (message_id, queue_id))
         await db.commit()
 
 

@@ -44,6 +44,38 @@ def _register_queue_panel(queue_id: int, chat_id: int, message_id: int) -> None:
     _queue_panels[queue_id] = (chat_id, message_id)
 
 
+async def _create_and_pin_group_panel(bot: Bot, queue_id: int, chat_id: int) -> None:
+    """Отправляет панель очереди в группу и закрепляет её. Используется при создании
+    очереди из ЛС, когда в самой группе сообщения ещё не было."""
+    queue = await db.get_queue(queue_id)
+    if not queue:
+        return
+    members = await db.get_queue_members(queue_id)
+    kb = queue_actions_keyboard(queue_id, False, False, not queue["is_active"])
+    try:
+        msg = await bot.send_message(
+            chat_id, format_queue_info(queue, members),
+            reply_markup=kb, parse_mode="HTML"
+        )
+        await bot.pin_chat_message(chat_id, msg.message_id, disable_notification=True)
+        await db.set_pinned_message(queue_id, msg.message_id)
+        _register_queue_panel(queue_id, chat_id, msg.message_id)
+    except Exception as e:
+        # не хватает прав закрепления или бот не админ группы — очередь всё равно создана
+        logger.warning("pin group panel failed for queue %s: %s", queue_id, e)
+
+
+async def _unpin_queue_panel(bot: Bot, queue: dict) -> None:
+    """Открепляет панель очереди при удалении, если она была закреплена."""
+    message_id = queue.get("pinned_message_id")
+    if not message_id:
+        return
+    try:
+        await bot.unpin_chat_message(queue["chat_id"], message_id)
+    except Exception as e:
+        logger.warning("unpin queue panel failed for queue %s: %s", queue.get("id"), e)
+
+
 async def _push_queue_update(bot: Bot, queue_id: int, skip_message_id: int | None = None) -> None:
     """Тихо обновляет групповую панель очереди после PM-операции."""
     entry = _queue_panels.get(queue_id)
@@ -1020,6 +1052,18 @@ async def fsm_remind(message: Message, state: FSMContext):
         reply_markup=kb,
         parse_mode="HTML")
 
+    if message.chat.type == "private":
+        # создание шло из ЛС — панели в группе ещё нет, отправляем и закрепляем отдельно
+        await _create_and_pin_group_panel(message.bot, queue_id, d["chat_id"])
+    else:
+        # создание прямо в группе — закрепляем уже отредактированное сообщение
+        try:
+            await message.bot.pin_chat_message(message.chat.id, d["msg_id"], disable_notification=True)
+            await db.set_pinned_message(queue_id, d["msg_id"])
+            _register_queue_panel(queue_id, message.chat.id, d["msg_id"])
+        except Exception as e:
+            logger.warning("pin group panel failed for queue %s: %s", queue_id, e)
+
 @router.callback_query(F.data == "cancel_fsm")
 async def cb_cancel(call: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -1162,7 +1206,10 @@ async def cb_confirm_delete(call: CallbackQuery):
     if not await is_admin(call.bot, call.message.chat.id, call.from_user.id):
         await call.answer("❌ Только администраторы.", show_alert=True)
         return
+    queue = await db.get_queue(queue_id)
     await db.delete_queue(queue_id)
+    if queue:
+        await _unpin_queue_panel(call.bot, queue)
     await call.answer("🗑 Удалена.", show_alert=True)
     queues = await db.get_chat_queues(call.message.chat.id)
     admin = await is_admin(call.bot, call.message.chat.id, call.from_user.id)
@@ -1848,6 +1895,7 @@ async def cb_adm_confirm_delete(call: CallbackQuery):
         return
     chat_id = q["chat_id"]
     await db.delete_queue(queue_id)
+    await _unpin_queue_panel(call.bot, q)
     await call.answer("🗑 Удалена.", show_alert=True)
     queues = await db.get_chat_queues(chat_id)
     chat_name = _chat_names.get(chat_id, f"Чат {chat_id}")
@@ -2198,6 +2246,7 @@ async def cb_adm_clone(call: CallbackQuery):
         reply_markup=admin_queue_actions_keyboard(new_id, original["chat_id"], is_closed=False),
         parse_mode="HTML"
     )
+    await _create_and_pin_group_panel(call.bot, new_id, original["chat_id"])
 
 
 @router.callback_query(F.data.startswith("adm_stats:"))
@@ -2533,7 +2582,13 @@ async def cb_clone_queue(call: CallbackQuery):
     new_queue = await db.get_queue(new_id)
     text = format_queue_info(new_queue, [])
     kb = queue_actions_keyboard(new_id, False, True, False)
-    await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    sent = await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await call.bot.pin_chat_message(call.message.chat.id, sent.message_id, disable_notification=True)
+        await db.set_pinned_message(new_id, sent.message_id)
+        _register_queue_panel(new_id, call.message.chat.id, sent.message_id)
+    except Exception as e:
+        logger.warning("pin group panel failed for queue %s: %s", new_id, e)
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):

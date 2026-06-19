@@ -119,6 +119,9 @@ async def init_db():
             ALTER TABLE queue_members ADD COLUMN IF NOT EXISTS frozen_until TIMESTAMP
         """)
         await conn.execute("""
+            ALTER TABLE queues ADD COLUMN IF NOT EXISTS pinned_message_id BIGINT
+        """)
+        await conn.execute("""
             ALTER TABLE reminder_tasks ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'remind'
         """)
         await conn.execute("""
@@ -271,6 +274,13 @@ async def close_queue(queue_id: int):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("UPDATE queues SET is_active=0 WHERE id=$1", queue_id)
+
+
+async def set_pinned_message(queue_id: int, message_id: Optional[int]):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE queues SET pinned_message_id=$1 WHERE id=$2", message_id, queue_id)
 
 
 async def delete_queue(queue_id: int):
