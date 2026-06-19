@@ -174,7 +174,7 @@ async def cb_back_main(call: CallbackQuery):
 
 @sched_router.callback_query(F.data == "sched_upload_new")
 async def cb_upload_new(call: CallbackQuery, state: FSMContext):
-    """Кнопка «📸 Загрузить расписание» — переводим в режим ожидания фото."""
+    """Кнопка «📸 Загрузить расписание» - переводим в режим ожидания фото."""
     if not await _is_admin(call.bot, call.message.chat.id, call.from_user.id):
         await call.answer("❌ Только администраторы могут загружать расписание.", show_alert=True)
         return
@@ -186,7 +186,7 @@ async def cb_upload_new(call: CallbackQuery, state: FSMContext):
     await call.message.answer(
         "📸 <b>Отправьте фотографию расписания.</b>\n\n"
         "Бот автоматически распознает занятия, группы, время и аудитории.\n\n"
-        "Чтобы отменить — отправьте /schedule",
+        "Чтобы отменить - отправьте /schedule",
         parse_mode="HTML",
     )
     await call.answer()
@@ -194,7 +194,7 @@ async def cb_upload_new(call: CallbackQuery, state: FSMContext):
 
 @sched_router.message(ScheduleStates.waiting_photo, F.photo)
 async def fsm_receive_schedule_photo(message: Message, state: FSMContext):
-    """Получаем фото расписания — отправляем в Groq AI и сохраняем результат."""
+    """Получаем фото расписания - отправляем в Groq AI и сохраняем результат."""
     data = await state.get_data()
     chat_id = data.get("chat_id", message.chat.id)
     await state.clear()
@@ -226,7 +226,7 @@ async def fsm_receive_schedule_photo(message: Message, state: FSMContext):
     groups_data = result.get("groups") or []
     if not groups_data:
         await status_msg.edit_text(
-            "❌ <b>Расписание не распознано — занятия не найдены.</b>\n\n"
+            "❌ <b>Расписание не распознано - занятия не найдены.</b>\n\n"
             "Попробуйте снять чётче или с другого угла.",
             parse_mode="HTML",
         )
@@ -246,10 +246,10 @@ async def fsm_receive_schedule_photo(message: Message, state: FSMContext):
         saved_groups.append((group_name, len(lessons)))
 
     if not saved_groups:
-        await status_msg.edit_text("❌ Не удалось сохранить расписание — занятия не распознаны.")
+        await status_msg.edit_text("❌ Не удалось сохранить расписание - занятия не распознаны.")
         return
 
-    groups_text = "\n".join(f"  👥 <b>{name}</b> — {cnt} занятий" for name, cnt in saved_groups)
+    groups_text = "\n".join(f"  👥 <b>{name}</b> - {cnt} занятий" for name, cnt in saved_groups)
 
     preview_lessons = groups_data[0].get("lessons", [])
     even_lessons, odd_lessons = split_by_week(preview_lessons)
@@ -289,7 +289,7 @@ async def fsm_no_photo(message: Message):
 
 @sched_router.callback_query(F.data == "sched_upload_changes")
 async def cb_upload_changes(call: CallbackQuery, state: FSMContext):
-    """Кнопка «📋 Загрузить изменения» — переводим в режим ожидания фото листа изменений."""
+    """Кнопка «📋 Загрузить изменения» - переводим в режим ожидания фото листа изменений."""
     if not await _is_admin(call.bot, call.message.chat.id, call.from_user.id):
         await call.answer("❌ Только администраторы могут загружать изменения.", show_alert=True)
         return
@@ -307,7 +307,7 @@ async def cb_upload_changes(call: CallbackQuery, state: FSMContext):
         "Бот распознает дату и применит изменения (отмены, переносы, замены) "
         "к группам, привязанным к этому чату: "
         + ", ".join(g["group_name"] for g in groups) + ".\n\n"
-        "Чтобы отменить — отправьте /schedule",
+        "Чтобы отменить - отправьте /schedule",
         parse_mode="HTML",
     )
     await call.answer()
@@ -343,7 +343,7 @@ async def fsm_receive_changes_photo(message: Message, state: FSMContext):
 
     if not changes:
         await status_msg.edit_text(
-            "ℹ️ Изменений не найдено — все группы «по расписанию», или лист не распознан.",
+            "ℹ️ Изменений не найдено - все группы «по расписанию», или лист не распознан.",
             parse_mode="HTML",
         )
         return
@@ -401,7 +401,7 @@ async def fsm_no_changes_photo(message: Message):
 
 @sched_router.callback_query(F.data == "sched_show")
 async def cb_show_week(call: CallbackQuery):
-    """Кнопка «📋 Вся неделя» — показываем полное расписание со звонками."""
+    """Кнопка «📋 Вся неделя» - показываем полное расписание со звонками."""
     chat_id = call.message.chat.id
     groups = await sdb.get_chat_groups(chat_id)
 
@@ -418,7 +418,7 @@ async def cb_show_week(call: CallbackQuery):
         if not week:
             continue
 
-        lines = [f"📅 <b>Расписание — {group['group_name']}</b>"]
+        lines = [f"📅 <b>Расписание - {group['group_name']}</b>"]
         for wd in sorted(week):
             lines.append(f"\n<b>{DAYS_FULL.get(wd, wd)}</b>")
             # Группируем по lesson_num чтобы дроби (wt=1 и wt=2) показать вместе
@@ -462,7 +462,7 @@ async def cb_show_week(call: CallbackQuery):
 
 @sched_router.callback_query(F.data == "sched_today")
 async def cb_show_today(call: CallbackQuery):
-    """Кнопка «📅 Сегодня» — расписание на текущий день с учётом переопределений."""
+    """Кнопка «📅 Сегодня» - расписание на текущий день с учётом переопределений."""
     chat_id = call.message.chat.id
     groups  = await sdb.get_chat_groups(chat_id)
 
@@ -479,12 +479,12 @@ async def cb_show_today(call: CallbackQuery):
         lessons = await get_today_schedule(group["id"])  # учитывает overrides
 
         if not lessons:
-            parts.append(f"😴 <b>{group['group_name']}</b> — {day_name}: пар нет")
+            parts.append(f"😴 <b>{group['group_name']}</b> - {day_name}: пар нет")
             continue
 
-        lines = [f"📅 <b>{group['group_name']} — {day_name}</b>\n"]
+        lines = [f"📅 <b>{group['group_name']} - {day_name}</b>\n"]
         for l in lessons:
-            teacher = f" — {l.get('teacher')}" if l.get("teacher") else ""
+            teacher = f" - {l.get('teacher')}" if l.get("teacher") else ""
             room    = f" [{l.get('room')}]" if l.get("room") else ""
             time_s  = _lesson_time_str(l, bells_cache)
             week_s  = _lesson_week_icon(l)
@@ -497,7 +497,7 @@ async def cb_show_today(call: CallbackQuery):
 
 @sched_router.callback_query(F.data == "sched_tomorrow")
 async def cb_show_tomorrow(call: CallbackQuery):
-    """Кнопка «📆 Завтра» — расписание на завтра с учётом переопределений."""
+    """Кнопка «📆 Завтра» - расписание на завтра с учётом переопределений."""
     chat_id = call.message.chat.id
     groups  = await sdb.get_chat_groups(chat_id)
 
@@ -515,12 +515,12 @@ async def cb_show_tomorrow(call: CallbackQuery):
         lessons = await get_tomorrow_schedule(group["id"], chat_id)  # учитывает overrides на дату завтра
 
         if not lessons:
-            parts.append(f"😴 <b>{group['group_name']}</b> — {day_name}: пар нет")
+            parts.append(f"😴 <b>{group['group_name']}</b> - {day_name}: пар нет")
             continue
 
-        lines = [f"📆 <b>{group['group_name']} — {day_name}</b>\n"]
+        lines = [f"📆 <b>{group['group_name']} - {day_name}</b>\n"]
         for l in lessons:
-            teacher = f" — {l.get('teacher')}" if l.get("teacher") else ""
+            teacher = f" - {l.get('teacher')}" if l.get("teacher") else ""
             room    = f" [{l.get('room')}]" if l.get("room") else ""
             time_s  = _lesson_time_str(l, bells_cache)
             week_s  = _lesson_week_icon(l)
@@ -583,7 +583,7 @@ async def cb_sources(call: CallbackQuery):
         text = (
             "<b>📡 Источники расписания</b>\n\n"
             "Источники ещё не добавлены.\n\n"
-            "Добавь Telegram-канал или группу ВКонтакте — бот будет проверять их "
+            "Добавь Telegram-канал или группу ВКонтакте - бот будет проверять их "
             f"каждые {SOURCE_MONITOR_INTERVAL_MIN} мин. и применять изменения автоматически."
         )
 
@@ -595,7 +595,7 @@ async def cb_sources(call: CallbackQuery):
 async def cb_rescan_sources(call: CallbackQuery):
     """
     Ручной форс-опрос источников чата без ожидания SOURCE_MONITOR_INTERVAL_MIN.
-    Не сбрасывает checkpoint — повторно обрабатываются только посты НОВЕЕ
+    Не сбрасывает checkpoint - повторно обрабатываются только посты НОВЕЕ
     последнего сохранённого last_post_id (как в обычном цикле мониторинга).
     """
     chat_id = int(call.data.split(":")[1])
@@ -631,7 +631,7 @@ async def cb_rescan_sources(call: CallbackQuery):
 
     await call.message.answer(
         f"✅ Проверено источников: {checked}.\n"
-        f"Если были новые посты с изменениями — они уже применены."
+        f"Если были новые посты с изменениями - они уже применены."
     )
 
 @sched_router.callback_query(F.data.startswith("sched_add_source:"))
@@ -736,8 +736,8 @@ async def cb_schedule_skip(call: CallbackQuery):
     await call.message.edit_text(
         "🔔 <b>Настройка автоматических очередей</b>\n\n"
         "Нажмите на занятие чтобы включить/выключить создание очереди:\n\n"
-        "🔔 — очередь создаётся автоматически\n"
-        "🔕 — очередь не создаётся",
+        "🔔 - очередь создаётся автоматически\n"
+        "🔕 - очередь не создаётся",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
     )
@@ -769,7 +769,7 @@ async def cb_toggle_skip(call: CallbackQuery):
 
 @sched_router.callback_query(F.data.startswith("sched_edit:"))
 async def cb_edit_entry(call: CallbackQuery):
-    """Точка входа в редактор — выбор группы."""
+    """Точка входа в редактор - выбор группы."""
     chat_id = int(call.data.split(":")[1])
 
     if not await _is_admin(call.bot, chat_id, call.from_user.id):
@@ -857,7 +857,7 @@ async def cb_edit_day(call: CallbackQuery):
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"sched_edit_group:{chat_id}:{group_id}")])
 
     await call.message.edit_text(
-        f"✏️ <b>{DAYS_FULL.get(wd)}</b> — выберите занятие:",
+        f"✏️ <b>{DAYS_FULL.get(wd)}</b> - выберите занятие:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
     )
@@ -913,9 +913,9 @@ async def cb_edit_lesson(call: CallbackQuery):
     text = (
         f"✏️ <b>Редактирование занятия</b>\n\n"
         f"📚 Предмет: <b>{lesson['subject']}</b>\n"
-        f"👤 Преподаватель: {lesson.get('teacher') or '—'}\n"
-        f"🏫 Аудитория: {lesson.get('room') or '—'}\n"
-        f"⏰ Время:{time_s or ' —'}\n"
+        f"👤 Преподаватель: {lesson.get('teacher') or '-'}\n"
+        f"🏫 Аудитория: {lesson.get('room') or '-'}\n"
+        f"⏰ Время:{time_s or ' -'}\n"
         f"🔔 Очередь: {'выкл 🔕' if lesson.get('skip_queue') else 'вкл 🔔'}\n"
         f"📅 {DAYS_FULL.get(wd)}, пара {lesson['lesson_num']}\n"
         f"📆 Неделя: <b>{wt_s}</b>{ev_s}"
@@ -939,7 +939,7 @@ FIELD_PROMPTS = {
 
 @sched_router.callback_query(F.data.startswith("sched_ef:"))
 async def cb_edit_field_start(call: CallbackQuery, state: FSMContext):
-    """Начало редактирования поля занятия — запрашиваем новое значение."""
+    """Начало редактирования поля занятия - запрашиваем новое значение."""
     # Формат: sched_ef:{chat_id}:{group_id}:{lesson_id}:{wd}:{field}
     parts = call.data.split(":")
     chat_id, group_id, lesson_id, wd, field = (
@@ -1028,7 +1028,7 @@ async def cb_del_lesson(call: CallbackQuery):
     await call.message.edit_text(
         "⚠️ <b>Удалить это занятие из базового расписания?</b>\n\n"
         "Это действие нельзя отменить.\n"
-        "Если нужно убрать пару только на один день — используйте <b>📋 Изменить на дату</b>.",
+        "Если нужно убрать пару только на один день - используйте <b>📋 Изменить на дату</b>.",
         reply_markup=kb, parse_mode="HTML",
     )
     await call.answer()
@@ -1079,7 +1079,7 @@ async def cb_add_day_select(call: CallbackQuery):
 
 @sched_router.callback_query(F.data.startswith("sched_add_lesson:"))
 async def cb_add_lesson_start(call: CallbackQuery, state: FSMContext):
-    """Шаг 1 — запрашиваем название предмета."""
+    """Шаг 1 - запрашиваем название предмета."""
     _, chat_id_s, group_id_s, wd_s = call.data.split(":")
     chat_id, group_id, wd = int(chat_id_s), int(group_id_s), int(wd_s)
 
@@ -1101,8 +1101,8 @@ async def cb_add_lesson_start(call: CallbackQuery, state: FSMContext):
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_edit_day:{chat_id}:{group_id}:{wd}")
     ]])
     await call.message.answer(
-        f"➕ <b>Новое занятие — {DAYS_FULL.get(wd)}, пара {next_num}</b>\n\n"
-        f"Шаг 1/4 — Введите <b>название предмета</b>:",
+        f"➕ <b>Новое занятие - {DAYS_FULL.get(wd)}, пара {next_num}</b>\n\n"
+        f"Шаг 1/4 - Введите <b>название предмета</b>:",
         reply_markup=cancel_kb, parse_mode="HTML",
     )
     await call.answer()
@@ -1110,7 +1110,7 @@ async def cb_add_lesson_start(call: CallbackQuery, state: FSMContext):
 
 @sched_router.message(ScheduleStates.add_lesson_subject)
 async def fsm_add_subject(message: Message, state: FSMContext):
-    """Шаг 1 получен — переходим к преподавателю."""
+    """Шаг 1 получен - переходим к преподавателю."""
     await state.update_data(new_subject=message.text.strip())
     await state.set_state(ScheduleStates.add_lesson_teacher)
     data = await state.get_data()
@@ -1118,7 +1118,7 @@ async def fsm_add_subject(message: Message, state: FSMContext):
         InlineKeyboardButton(text="⏭ Пропустить", callback_data="add_skip_teacher"),
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_edit_day:{data['chat_id']}:{data['group_id']}:{data['wd']}")
     ]])
-    await message.answer("Шаг 2/4 — Введите <b>ФИО преподавателя</b> (или нажмите Пропустить):",
+    await message.answer("Шаг 2/4 - Введите <b>ФИО преподавателя</b> (или нажмите Пропустить):",
                          reply_markup=cancel_kb, parse_mode="HTML")
 
 
@@ -1132,7 +1132,7 @@ async def cb_skip_teacher(call: CallbackQuery, state: FSMContext):
         InlineKeyboardButton(text="⏭ Пропустить", callback_data="add_skip_room"),
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_edit_day:{data['chat_id']}:{data['group_id']}:{data['wd']}")
     ]])
-    await call.message.answer("Шаг 3/4 — Введите <b>аудиторию</b> (или нажмите Пропустить):",
+    await call.message.answer("Шаг 3/4 - Введите <b>аудиторию</b> (или нажмите Пропустить):",
                                reply_markup=cancel_kb, parse_mode="HTML")
     await call.answer()
 
@@ -1147,7 +1147,7 @@ async def fsm_add_teacher(message: Message, state: FSMContext):
         InlineKeyboardButton(text="⏭ Пропустить", callback_data="add_skip_room"),
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_edit_day:{data['chat_id']}:{data['group_id']}:{data['wd']}")
     ]])
-    await message.answer("Шаг 3/4 — Введите <b>аудиторию</b> (или нажмите Пропустить):",
+    await message.answer("Шаг 3/4 - Введите <b>аудиторию</b> (или нажмите Пропустить):",
                          reply_markup=cancel_kb, parse_mode="HTML")
 
 
@@ -1162,7 +1162,7 @@ async def cb_skip_room(call: CallbackQuery, state: FSMContext):
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_edit_day:{data['chat_id']}:{data['group_id']}:{data['wd']}")
     ]])
     await call.message.answer(
-        "Шаг 4/4 — Введите <b>время</b> в формате <code>HH:MM-HH:MM</code>\n"
+        "Шаг 4/4 - Введите <b>время</b> в формате <code>HH:MM-HH:MM</code>\n"
         "Например: <code>08:00-09:35</code>\n(или нажмите Пропустить, время возьмётся из звонков)",
         reply_markup=cancel_kb, parse_mode="HTML"
     )
@@ -1171,7 +1171,7 @@ async def cb_skip_room(call: CallbackQuery, state: FSMContext):
 
 @sched_router.message(ScheduleStates.add_lesson_room)
 async def fsm_add_room(message: Message, state: FSMContext):
-    """Шаг 3 получен — переходим к времени."""
+    """Шаг 3 получен - переходим к времени."""
     await state.update_data(new_room=message.text.strip())
     await state.set_state(ScheduleStates.add_lesson_time)
     data = await state.get_data()
@@ -1180,14 +1180,14 @@ async def fsm_add_room(message: Message, state: FSMContext):
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_edit_day:{data['chat_id']}:{data['group_id']}:{data['wd']}")
     ]])
     await message.answer(
-        "Шаг 4/4 — Введите <b>время</b> в формате <code>HH:MM-HH:MM</code>\n"
+        "Шаг 4/4 - Введите <b>время</b> в формате <code>HH:MM-HH:MM</code>\n"
         "Например: <code>08:00-09:35</code>\n(или нажмите Пропустить, время возьмётся из звонков)",
         reply_markup=cancel_kb, parse_mode="HTML"
     )
 
 
 async def _finish_add_lesson(target, state: FSMContext, ts: str = "", te: str = ""):
-    """Финальный шаг — сохраняем новое занятие в БД."""
+    """Финальный шаг - сохраняем новое занятие в БД."""
     data = await state.get_data()
     await state.clear()
 
@@ -1222,13 +1222,13 @@ async def _finish_add_lesson(target, state: FSMContext, ts: str = "", te: str = 
 
 @sched_router.callback_query(F.data == "add_skip_time")
 async def cb_skip_time(call: CallbackQuery, state: FSMContext):
-    """Пропустить ввод времени — сохраняем занятие без явного времени."""
+    """Пропустить ввод времени - сохраняем занятие без явного времени."""
     await _finish_add_lesson(call, state)
 
 
 @sched_router.message(ScheduleStates.add_lesson_time)
 async def fsm_add_time(message: Message, state: FSMContext):
-    """Шаг 4 получен — сохраняем занятие с временем."""
+    """Шаг 4 получен - сохраняем занятие с временем."""
     m = re.match(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})", message.text.strip())
     if not m:
         await message.answer("❌ Неверный формат. Введите как <b>08:00-09:35</b> или нажмите Пропустить.", parse_mode="HTML")
@@ -1242,7 +1242,7 @@ async def fsm_add_time(message: Message, state: FSMContext):
 
 @sched_router.callback_query(F.data.startswith("sched_override:"))
 async def cb_override_entry(call: CallbackQuery):
-    """Точка входа в меню ручных изменений на дату — выбор группы."""
+    """Точка входа в меню ручных изменений на дату - выбор группы."""
     chat_id = int(call.data.split(":")[1])
 
     if not await _is_admin(call.bot, chat_id, call.from_user.id):
@@ -1303,7 +1303,7 @@ async def cb_override_group(call: CallbackQuery):
 
 @sched_router.callback_query(F.data.startswith("sched_override_day:"))
 async def cb_override_day(call: CallbackQuery):
-    """Список пар на выбранный день — можно отменить каждую или добавить новую."""
+    """Список пар на выбранный день - можно отменить каждую или добавить новую."""
     parts = call.data.split(":")
     chat_id, group_id, date_str = int(parts[1]), int(parts[2]), parts[3]
 
@@ -1355,7 +1355,7 @@ async def cb_override_day(call: CallbackQuery):
 
 @sched_router.callback_query(F.data.startswith("sched_or_cancel:"))
 async def cb_or_cancel(call: CallbackQuery):
-    """Отменяем конкретную пару на дату — записываем override с action=cancel."""
+    """Отменяем конкретную пару на дату - записываем override с action=cancel."""
     parts = call.data.split(":")
     chat_id, group_id, lesson_num, date_str = int(parts[1]), int(parts[2]), int(parts[3]), parts[4]
 
@@ -1375,7 +1375,7 @@ async def cb_or_cancel(call: CallbackQuery):
 
 @sched_router.callback_query(F.data.startswith("sched_or_restore:"))
 async def cb_or_restore(call: CallbackQuery):
-    """Восстанавливаем ранее отменённую пару — удаляем override из БД."""
+    """Восстанавливаем ранее отменённую пару - удаляем override из БД."""
     parts = call.data.split(":")
     chat_id, group_id, lesson_num, date_str = int(parts[1]), int(parts[2]), int(parts[3]), parts[4]
 
@@ -1416,7 +1416,7 @@ async def cb_or_add(call: CallbackQuery, state: FSMContext):
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_override_day:{chat_id}:{group_id}:{date_str}")
     ]])
     await call.message.answer(
-        f"➕ <b>Внеплановое занятие на {day_fmt}</b>\n\nШаг 1/4 — Введите название предмета:",
+        f"➕ <b>Внеплановое занятие на {day_fmt}</b>\n\nШаг 1/4 - Введите название предмета:",
         reply_markup=cancel_kb, parse_mode="HTML"
     )
     await call.answer()
@@ -1435,7 +1435,7 @@ def _bells_text(bells: list[dict]) -> str:
 
 
 def _bells_keyboard(chat_id: int, bells: list[dict]) -> InlineKeyboardMarkup:
-    """Клавиатура для редактора звонков — каждая пара кликабельна."""
+    """Клавиатура для редактора звонков - каждая пара кликабельна."""
     buttons = [
         [InlineKeyboardButton(
             text=f"✏️ Пара {b['lesson_num']}: {b['time_start']}–{b['time_end']}",
@@ -1492,7 +1492,7 @@ async def cb_bells_edit(call: CallbackQuery, state: FSMContext):
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"sched_bells:{chat_id}"),
     ]])
     await call.message.answer(
-        f"⏰ <b>Пара {lesson_num}</b> — сейчас: <code>{current}</code>\n\n"
+        f"⏰ <b>Пара {lesson_num}</b> - сейчас: <code>{current}</code>\n\n"
         f"Введите новое время в формате <b>HH:MM-HH:MM</b>\n"
         f"Например: <code>09:45-11:20</code>",
         reply_markup=kb, parse_mode="HTML",
@@ -1571,7 +1571,7 @@ async def fsm_bells_add_time(message: Message, state: FSMContext):
 
 @sched_router.callback_query(F.data.startswith("bells_del:"))
 async def cb_bells_del(call: CallbackQuery, state: FSMContext):
-    """Удаляем кастомный звонок — пара вернётся к дефолтному времени."""
+    """Удаляем кастомный звонок - пара вернётся к дефолтному времени."""
     _, chat_id_s, num_s = call.data.split(":")
     chat_id, lesson_num = int(chat_id_s), int(num_s)
 
@@ -1698,7 +1698,7 @@ async def cb_toggle_week_type(call: CallbackQuery):
     """
     Переключает тип недели для занятия по циклу:
     0 (каждую) → 1 (нечётные) → 2 (чётные) → 0
-    Это нужно для пар через дробь — когда на одной неделе один предмет, на другой другой.
+    Это нужно для пар через дробь - когда на одной неделе один предмет, на другой другой.
     """
     _, chat_id_s, lesson_id_s, group_id_s, wd_s = call.data.split(":")
     chat_id, lesson_id, group_id, wd = int(chat_id_s), int(lesson_id_s), int(group_id_s), int(wd_s)
@@ -1817,7 +1817,7 @@ async def _show_filtered_week(call: CallbackQuery, week_type: int):
                 lesson_num = int(l.get("lesson_num") or 0)
                 subject = l.get("subject") or ""
                 teacher = l.get("teacher") or ""
-                teacher_part = f" — {teacher}" if teacher else ""
+                teacher_part = f" - {teacher}" if teacher else ""
                 room_part = f" [{l['room']}]" if l.get("room") else ""
 
                 # На уровне "как в примере": первая строка дня начинается с названия дня.
